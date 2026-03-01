@@ -1,9 +1,8 @@
 import streamlit as st
 import requests
-import uuid
-from typing import Dict, List
+from typing import Optional
 
-BACKEND_URL = "http://localhost:3000"
+BACKEND_URL = "http://localhost:3000/api"
 
 st.set_page_config(
     page_title="Smat Agent",
@@ -42,113 +41,31 @@ html, body, [data-testid="stAppViewContainer"], [data-testid="stMain"] {
     color: var(--text-primary) !important;
 }
 
+/* ── SIDEBAR ── */
 [data-testid="stSidebar"] {
     background: var(--surface) !important;
     border-right: 1px solid var(--border) !important;
-    min-width: 290px !important;
-    max-width: 290px !important;
-    padding: 0 !important;
-    transform: translateX(0) !important;
-    margin-left: 0 !important;
-    visibility: visible !important;
-}
-
-[data-testid="stSidebar"] > div {
-    padding: 0 !important;
-    height: 100vh !important;
-    display: flex !important;
-    flex-direction: column !important;
-    overflow: hidden !important;
-}
-
-[data-testid="stSidebar"] section,
-[data-testid="stSidebar"] .block-container {
-    padding: 0 1rem !important;
-    flex: 1 !important;
-    display: flex !important;
-    flex-direction: column !important;
-    overflow: hidden !important;
-    gap: 0 !important;
+    min-width: 300px !important;
+    max-width: 300px !important;
 }
 
 [data-testid="stSidebarCollapsedControl"],
 [data-testid="stSidebarCollapseButton"],
-[data-testid="collapsedControl"],
 button[aria-label="Close sidebar"],
 button[title="Close sidebar"] {
     display: none !important;
-    visibility: hidden !important;
-    width: 0 !important;
-    height: 0 !important;
-    pointer-events: none !important;
-    position: absolute !important;
-    overflow: hidden !important;
 }
 
-.sb-brand {
-    padding: 1.2rem 0;
-    border-bottom: 1px solid var(--border);
-    flex-shrink: 0;
-}
-
-.sb-brand-icon {
-    width: 38px;
-    height: 38px;
-    background: linear-gradient(135deg, #7c6af7 0%, #a78bfa 100%);
-    border-radius: 11px;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    font-size: 18px;
-    box-shadow: 0 4px 18px rgba(124,106,247,0.4), inset 0 1px 0 rgba(255,255,255,0.15);
-    flex-shrink: 0;
-    color: white;
-    font-weight: 900;
-}
-
+/* brand title — NOT italic */
 .sb-brand-name {
-    font-family: 'Syne', sans-serif;
-    font-size: 1.1rem;
+    font-family: 'Syne', sans-serif !important;
+    font-style: normal !important;
+    font-size: 1.15rem;
     font-weight: 800;
     color: var(--text-primary);
     letter-spacing: -0.03em;
-    line-height: 1;
-}
-
-.sb-brand-tag {
-    font-size: 0.58rem;
-    color: var(--accent-2);
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-    opacity: 0.65;
-    margin-top: 3px;
-}
-
-.sb-new-wrap {
-    padding: 0.9rem 0 0.7rem;
-    flex-shrink: 0;
-}
-
-[data-testid="stSidebar"] button[kind="primary"] {
-    background: var(--surface-raised) !important;
-    border: 1px solid var(--border-bright) !important;
-    color: var(--text-primary) !important;
-    font-family: 'Syne', sans-serif !important;
-    font-size: 0.82rem !important;
-    font-weight: 600 !important;
-    letter-spacing: 0.02em !important;
-    border-radius: 8px !important;
-    padding: 0.68rem 1rem !important;
-    width: 100% !important;
-    transition: all 0.15s ease !important;
-    box-shadow: none !important;
-    cursor: pointer;
-}
-
-[data-testid="stSidebar"] button[kind="primary"]:hover {
-    background: var(--surface-hover) !important;
-    border-color: var(--border) !important;
-    box-shadow: none !important;
+    padding: 1.2rem 1rem 0.9rem;
+    border-bottom: 1px solid var(--border);
 }
 
 .sb-label {
@@ -157,215 +74,89 @@ button[title="Close sidebar"] {
     letter-spacing: 0.22em;
     text-transform: uppercase;
     color: var(--text-muted);
-    padding: 0 0 0.45rem;
-    flex-shrink: 0;
+    padding: 0.9rem 1rem 0.4rem;
 }
 
-.sb-threads {
-    flex: 1;
-    overflow-y: auto;
-    padding: 0;
-    display: flex;
-    flex-direction: column;
-    gap: 2px;
-    min-height: 0;
-}
-
-.sb-threads::-webkit-scrollbar { width: 3px; }
-.sb-threads::-webkit-scrollbar-thumb { background: var(--border-bright); border-radius: 2px; }
-
-.th-item {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    padding: 0.62rem 0.8rem;
-    border-radius: 11px;
-    border: 1px solid transparent;
-    transition: all 0.17s ease;
-    position: relative;
-    overflow: hidden;
-    cursor: pointer;
-}
-
-.th-item:hover { background: var(--surface-hover); border-color: var(--border); }
-
-.th-item.active {
-    background: rgba(124,106,247,0.09);
-    border-color: rgba(124,106,247,0.22);
-}
-
-.th-item.active::before {
-    content: '';
-    position: absolute;
-    left: 0; top: 18%; bottom: 18%;
-    width: 3px;
-    background: linear-gradient(to bottom, var(--accent), var(--accent-2));
-    border-radius: 0 3px 3px 0;
-}
-
-.th-avatar {
-    width: 34px; height: 34px;
-    border-radius: 9px;
-    background: var(--surface-raised);
-    border: 1px solid var(--border-bright);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 18px;
-    flex-shrink: 0;
-    transition: all 0.17s;
-    color: var(--accent-2);
-}
-
-.th-item.active .th-avatar {
-    background: rgba(124,106,247,0.14);
-    border-color: rgba(124,106,247,0.28);
-}
-
-.th-body { flex: 1; min-width: 0; }
-
-.th-title {
-    font-family: 'Syne', sans-serif;
-    font-size: 0.78rem;
-    font-weight: 700;
-    color: var(--text-primary);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    display: flex;
-    align-items: center;
-    gap: 6px;
-}
-
-.th-item.active .th-title { color: var(--accent-2); }
-
-.th-badge {
-    font-family: 'DM Mono', monospace;
-    font-size: 0.5rem;
-    font-weight: 500;
-    letter-spacing: 0.08em;
-    padding: 1px 5px;
-    background: rgba(124,106,247,0.15);
-    border: 1px solid rgba(124,106,247,0.25);
-    border-radius: 4px;
-    color: var(--accent-2);
-    text-transform: uppercase;
-}
-
-.th-preview {
-    font-size: 0.64rem;
-    color: var(--text-muted);
-    white-space: nowrap;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    margin-top: 3px;
-    font-style: italic;
-}
-
-.th-count {
-    font-size: 0.62rem;
-    color: var(--text-muted);
-    flex-shrink: 0;
-    letter-spacing: 0.03em;
-}
-
-.sb-divider {
-    height: 1px;
-    background: var(--border);
-    margin: 0.6rem 0;
-    flex-shrink: 0;
-}
-
-.sb-footer {
-    padding: 0.75rem 0 1rem;
-    flex-shrink: 0;
-}
-
-.sb-footer-label {
-    font-size: 0.58rem;
-    font-weight: 600;
-    letter-spacing: 0.22em;
-    text-transform: uppercase;
-    color: var(--text-muted);
-    margin-bottom: 0.5rem;
-    padding: 0;
-}
-
-[data-testid="stSidebar"] [data-testid="stFileUploader"] {
-    background: transparent !important;
-    border: none !important;
-    padding: 0 !important;
-    margin: 0 !important;
-}
-
-[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
+/* New conversation button */
+[data-testid="stSidebar"] button[kind="primary"] {
     background: var(--surface-raised) !important;
-    border: 1px dashed var(--border-bright) !important;
-    border-radius: 10px !important;
-    padding: 0.85rem !important;
-    transition: all 0.2s ease !important;
-    min-height: unset !important;
+    border: 1px solid var(--border-bright) !important;
+    color: var(--text-primary) !important;
+    font-family: 'Syne', sans-serif !important;
+    font-size: 0.82rem !important;
+    font-weight: 600 !important;
+    border-radius: 8px !important;
+    width: 100% !important;
+    transition: all 0.15s ease !important;
+    box-shadow: none !important;
+    margin: 0.75rem 0 0.4rem !important;
 }
 
-[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"]:hover {
-    border-color: var(--border) !important;
+[data-testid="stSidebar"] button[kind="primary"]:hover {
     background: var(--surface-hover) !important;
 }
 
-[data-testid="stSidebar"] [data-testid="stFileUploaderDropzoneInstructions"] {
-    display: none !important;
-}
-
-[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] small {
-    display: none !important;
-}
-
-[data-testid="stSidebar"] button:not([kind="primary"]) {
-    all: unset !important;
-    display: inline-flex !important;
-    justify-content: center;
+/* ── CONVERSATION ROW ── */
+.th-row {
+    display: flex;
     align-items: center;
-    cursor: pointer;
-    padding: 0 6px;
-    color: var(--accent-2);
-    font-size: 1rem;
-    transition: color 0.2s ease;
+    gap: 0;
+    padding: 0 0.6rem;
+    border-radius: 10px;
+    border: 1px solid transparent;
+    transition: background 0.15s, border-color 0.15s;
+    position: relative;
+    margin: 1px 0.5rem;
 }
 
-[data-testid="stSidebar"] button:not([kind="primary"]):hover {
-    color: var(--accent);
+.th-row:hover { background: var(--surface-hover); border-color: var(--border); }
+.th-row.active { background: rgba(124,106,247,0.09); border-color: rgba(124,106,247,0.22); }
+
+/* Streamlit button resets inside sidebar */
+[data-testid="stSidebar"] .stButton > button {
+    all: unset !important;
+    cursor: pointer !important;
+    display: block !important;
+    width: 100% !important;
+    text-align: left !important;
+    font-family: 'DM Mono', monospace !important;
+    font-size: 0.8rem !important;
+    color: var(--text-primary) !important;
+    padding: 0.6rem 0.5rem !important;
+    border-radius: 8px !important;
+    transition: color 0.15s !important;
+    white-space: nowrap !important;
+    overflow: hidden !important;
+    text-overflow: ellipsis !important;
 }
 
-[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] > div:last-child button {
-    font-size: 0 !important;
-    padding: 4px 8px !important;
-    min-width: unset !important;
-    height: auto !important;
-    border-radius: 4px !important;
-    background: transparent !important;
-    border: 1px solid rgba(248,113,113,0.3) !important;
-    color: transparent !important;
+[data-testid="stSidebar"] .stButton > button:hover {
+    color: var(--accent-2) !important;
+}
+
+/* small icon buttons (delete / rename) */
+.del-btn > button {
+    all: unset !important;
+    cursor: pointer !important;
     display: inline-flex !important;
     align-items: center !important;
     justify-content: center !important;
-    cursor: pointer !important;
+    font-size: 0.75rem !important;
+    color: var(--text-muted) !important;
+    padding: 3px 7px !important;
+    border-radius: 6px !important;
+    border: 1px solid transparent !important;
+    transition: all 0.15s !important;
+    white-space: nowrap !important;
 }
 
-[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] > div:last-child button::before {
-    content: "×";
-    font-size: 0.7rem;
-    color: var(--error);
-    font-weight: 500;
-    line-height: 1;
+.del-btn > button:hover {
+    color: var(--error) !important;
+    border-color: rgba(248,113,113,0.35) !important;
+    background: rgba(248,113,113,0.07) !important;
 }
 
-[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] > div:last-child:hover button {
-    background: rgba(248,113,113,0.08) !important;
-    border-color: rgba(248,113,113,0.4) !important;
-}
-
-[data-testid="stSidebar"] [data-testid="stHorizontalBlock"] > div:last-child:hover button::before {
-    content: "Delete";
-}
-
+/* ── MAIN ── */
 .main .block-container {
     max-width: 820px !important;
     padding: 0 2rem 2rem !important;
@@ -373,41 +164,26 @@ button[title="Close sidebar"] {
 }
 
 .topbar {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
     padding: 1.15rem 0 0.75rem;
     border-bottom: 1px solid var(--border);
     margin-bottom: 1.5rem;
-    gap: 12px;
-}
-
-.topbar-left { display: flex; align-items: center; gap: 11px; }
-
-.topbar-icon {
-    width: 36px; height: 36px;
-    border-radius: 10px;
-    background: var(--accent-subtle);
-    border: 1px solid rgba(124,106,247,0.2);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 16px;
-    color: var(--accent-2);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
 }
 
 .topbar-title {
-    font-family: 'Syne', sans-serif;
+    font-family: 'Syne', sans-serif !important;
+    font-style: normal !important;
     font-size: 1rem;
     font-weight: 700;
     color: var(--text-primary);
     letter-spacing: -0.02em;
-    line-height: 1;
 }
 
 .topbar-sub {
     font-size: 0.65rem;
     color: var(--text-muted);
-    letter-spacing: 0.04em;
-    margin-top: 3px;
 }
 
 .status-pill {
@@ -422,21 +198,20 @@ button[title="Close sidebar"] {
     color: var(--success);
     letter-spacing: 0.1em;
     text-transform: uppercase;
-    font-weight: 500;
 }
 
 .status-dot {
     width: 5px; height: 5px;
     background: var(--success);
     border-radius: 50%;
-    animation: statusPulse 2.5s infinite;
+    animation: pulse 2.5s infinite;
 }
 
-@keyframes statusPulse {
-    0%, 100% { opacity: 1; box-shadow: 0 0 0 0 rgba(52,211,153,0.5); }
-    50% { opacity: 0.5; box-shadow: 0 0 0 4px rgba(52,211,153,0); }
+@keyframes pulse {
+    0%,100%{opacity:1}50%{opacity:0.4}
 }
 
+/* ── CHAT MESSAGES ── */
 [data-testid="stChatMessage"] {
     background: transparent !important;
     border: none !important;
@@ -459,6 +234,7 @@ button[title="Close sidebar"] {
     border-color: rgba(124,106,247,0.14) !important;
 }
 
+/* ── CHAT INPUT ── */
 [data-testid="stChatInput"] {
     border-top: 1px solid var(--border) !important;
     background: var(--surface) !important;
@@ -469,12 +245,11 @@ button[title="Close sidebar"] {
     background: var(--surface-raised) !important;
     border: 1px solid var(--border-bright) !important;
     border-radius: 14px !important;
-    transition: all 0.2s ease !important;
+    transition: border-color 0.2s !important;
 }
 
 [data-testid="stChatInputContainer"]:focus-within {
-    border-color: var(--border) !important;
-    box-shadow: none !important;
+    border-color: rgba(124,106,247,0.35) !important;
 }
 
 [data-testid="stChatInputTextArea"] {
@@ -484,6 +259,96 @@ button[title="Close sidebar"] {
     background: transparent !important;
 }
 
+/* ── FILE UPLOADER ── */
+[data-testid="stSidebar"] [data-testid="stFileUploader"] {
+    background: transparent !important;
+    border: none !important;
+    padding: 0 0.5rem !important;
+    margin: 0 !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
+    background: var(--surface-raised) !important;
+    border: 1px dashed var(--border-bright) !important;
+    border-radius: 10px !important;
+    padding: 0.85rem 1rem !important;
+    transition: all 0.2s !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"]:hover {
+    border-color: var(--accent) !important;
+    background: var(--surface-hover) !important;
+}
+
+/* hide default uploader label text; keep Browse files button */
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzoneInstructions"] > div > small {
+    display: none !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzoneInstructions"] > div > span {
+    display: none !important;
+}
+
+/* "Browse files" button inside uploader */
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button {
+    all: unset !important;
+    cursor: pointer !important;
+    display: inline-flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    gap: 6px !important;
+    font-family: 'Syne', sans-serif !important;
+    font-size: 0.78rem !important;
+    font-weight: 600 !important;
+    color: var(--accent-2) !important;
+    background: rgba(124,106,247,0.1) !important;
+    border: 1px solid rgba(124,106,247,0.25) !important;
+    border-radius: 7px !important;
+    padding: 0.5rem 1rem !important;
+    transition: all 0.15s !important;
+    width: 100% !important;
+    text-align: center !important;
+}
+
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button:hover {
+    background: rgba(124,106,247,0.18) !important;
+    border-color: rgba(124,106,247,0.45) !important;
+    color: white !important;
+}
+
+/* divider */
+.sb-divider {
+    height: 1px;
+    background: var(--border);
+    margin: 0.6rem 0.5rem;
+}
+
+/* doc list items */
+.doc-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0.45rem 0.85rem;
+    font-size: 0.72rem;
+    color: var(--text-secondary);
+    border-radius: 8px;
+    margin: 1px 0.5rem;
+    border: 1px solid transparent;
+    transition: all 0.15s;
+}
+
+.doc-item:hover {
+    background: var(--surface-hover);
+    border-color: var(--border);
+    color: var(--text-primary);
+}
+
+.doc-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
+
+.doc-status-pending  { color: #fbbf24; font-size: 0.6rem; letter-spacing: 0.08em; }
+.doc-status-completed{ color: var(--success); font-size: 0.6rem; letter-spacing: 0.08em; }
+
+/* empty state */
 .empty-state {
     display: flex;
     flex-direction: column;
@@ -494,182 +359,248 @@ button[title="Close sidebar"] {
     text-align: center;
 }
 
-.empty-glyph {
-    width: 76px; height: 76px;
-    border-radius: 20px;
-    background: linear-gradient(135deg, rgba(124,106,247,0.1), rgba(167,139,250,0.04));
-    border: 1px solid rgba(124,106,247,0.14);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 2.2rem;
-    margin-bottom: 6px;
-    color: var(--accent-2);
-    font-weight: 900;
-}
-
 .empty-title {
     font-family: 'Syne', sans-serif;
+    font-style: normal;
     font-size: 1.15rem;
     font-weight: 700;
     color: var(--text-secondary);
-    letter-spacing: -0.02em;
 }
 
 .empty-sub {
     font-size: 0.76rem;
     color: var(--text-muted);
     line-height: 1.8;
-    max-width: 260px;
 }
 
-.stAlert, div[data-testid="stAlert"] {
+/* text input (for rename) */
+[data-testid="stSidebar"] input[type="text"] {
     background: var(--surface-raised) !important;
     border: 1px solid var(--border-bright) !important;
-    border-radius: 10px !important;
+    border-radius: 7px !important;
+    color: var(--text-primary) !important;
     font-family: 'DM Mono', monospace !important;
     font-size: 0.8rem !important;
+    padding: 0.45rem 0.7rem !important;
 }
-
-[data-testid="stVerticalBlock"] {
-    padding: 0 !important;
-}
-
 </style>
 """, unsafe_allow_html=True)
 
-if "chats" not in st.session_state:
-    st.session_state.chats = {}  
-if "current_chat" not in st.session_state:
-    st.session_state.current_chat = None
 
-def send_message(chat_id: str, message: str) -> str:
-    """Send user message to backend and receive assistant reply."""
+def api(method: str, path: str, **kwargs):
     try:
-        response = requests.post(
-            f"{BACKEND_URL}/chat",
-            json={"chatId": chat_id, "message": message},
-            timeout=15,
-        )
-        response.raise_for_status()
-        data = response.json()
-        return data.get("reply", "")
+        r = getattr(requests, method)(f"{BACKEND_URL}{path}", timeout=15, **kwargs)
+        r.raise_for_status()
+        return r.json()
     except Exception as e:
-        return f"Error contacting backend: {str(e)}"
+        return {"error": str(e)}
 
-def add_message(chat_id: str, role: str, content: str) -> None:
-    if chat_id not in st.session_state.chats:
-        st.session_state.chats[chat_id] = []
-    st.session_state.chats[chat_id].append({"role": role, "content": content})
+
+def load_chats():
+    data = api("get", "/chats")
+    if isinstance(data, list):
+        st.session_state.chats_meta = {c["id"]: c for c in data}
+    else:
+        st.session_state.chats_meta = {}
+
+
+def load_documents():
+    data = api("get", "/documents")
+    st.session_state.documents = data if isinstance(data, list) else []
+
+
+if "chats_meta" not in st.session_state:
+    load_chats()
+if "documents" not in st.session_state:
+    load_documents()
+if "current_chat_id" not in st.session_state:
+    st.session_state.current_chat_id = None
+if "messages" not in st.session_state:
+    st.session_state.messages = []
+if "new_chat_name" not in st.session_state:
+    st.session_state.new_chat_name = ""
+if "doc_upload_key" not in st.session_state:
+    st.session_state.doc_upload_key = 0
+if "editing_chat_id" not in st.session_state:
+    st.session_state.editing_chat_id = None
 
 with st.sidebar:
-    st.markdown("""
-    <div class="sb-brand">
-        <div class="sb-brand-name">Smat Agent</div>
-    </div>
-    """, unsafe_allow_html=True)
+    st.markdown('<div class="sb-brand-name">Smat Agent</div>', unsafe_allow_html=True)
 
-    st.markdown('<div class="sb-new-wrap">', unsafe_allow_html=True)
-    if st.button("＋ New Conversation", type="primary", use_container_width=True):
-        new_id = str(uuid.uuid4())[:8]
-        st.session_state.chats[new_id] = []
-        st.session_state.current_chat = new_id
-    st.markdown('</div>', unsafe_allow_html=True)
+    name_input = st.text_input(
+        "Conversation name",
+        placeholder="e.g. Research session",
+        label_visibility="collapsed",
+        key="conv_name_input",
+    )
 
-    if st.session_state.chats:
+    if st.button("＋  New Conversation", type="primary", use_container_width=True):
+        chat_name = name_input.strip() or "New Conversation"
+        result = api("post", "/chats", json={"name": chat_name})
+        if "id" in result:
+            load_chats()
+            st.session_state.current_chat_id = result["id"]
+            st.session_state.messages = []
+            st.rerun()
+
+    if st.session_state.chats_meta:
         st.markdown('<div class="sb-label">Conversations</div>', unsafe_allow_html=True)
-        st.markdown('<div class="sb-threads">', unsafe_allow_html=True)
 
-        for cid in list(st.session_state.chats.keys()):
-            msgs = st.session_state.chats[cid]
-            count = len(msgs) // 2
-            is_active = st.session_state.current_chat == cid
-            cls = "active" if is_active else ""
+        for cid, meta in list(st.session_state.chats_meta.items()):
+            is_active = st.session_state.current_chat_id == cid
+            label = meta.get("name", f"#{cid[:6]}")
+            preview = meta.get("preview", "")
 
-            user_msgs = [m for m in msgs if m["role"] == "user"]
-            preview = "No messages yet"
-            if user_msgs:
-                raw = user_msgs[-1]["content"]
-                preview = raw[:30] + ("…" if len(raw) > 30 else "")
+            is_editing = st.session_state.editing_chat_id == cid
 
-            badge = ""
-            if is_active:
-                badge = '<span class="th-badge">Active</span>'
+            col_main, col_rename, col_del = st.columns([7, 2, 2])
 
-            container = st.container()
-            with container:
-                cols = st.columns([9, 3])
-                with cols[0]:
-                    if st.button(f"#{cid} {preview}", key=f"select_{cid}", help=f"Select conversation {cid}", use_container_width=True):
-                        st.session_state.current_chat = cid
-                        st.experimental_rerun()
-                    st.markdown(f"""
-                    <style>
-                    button[key="select_{cid}"] {{
-                        text-align: left;
-                        font-family: 'DM Mono', monospace;
-                        font-size: 0.85rem;
-                        color: {'var(--accent-2)' if is_active else 'var(--text-primary)'};
-                        background-color: {'rgba(124,106,247,0.09)' if is_active else 'transparent'};
-                        border-radius: 11px;
-                        padding: 10px 12px;
-                        width: 100%;
-                    }}
-                    </style>
-                    """, unsafe_allow_html=True)
-                with cols[1]:
-                    if st.button("×", key=f"delete_{cid}", help="Delete"):
-                        del st.session_state.chats[cid]
-                        if st.session_state.current_chat == cid:
-                            st.session_state.current_chat = None
-                        st.experimental_rerun()
+            with col_main:
+                if is_editing:
+                    st.text_input(
+                        "Rename conversation",
+                        value=label,
+                        key=f"edit_name_{cid}",
+                        label_visibility="collapsed",
+                    )
+                else:
+                    display = f"{'▶ ' if is_active else ''}{label}"
+                    if st.button(display, key=f"sel_{cid}", use_container_width=True, help=preview):
+                        if st.session_state.current_chat_id != cid:
+                            st.session_state.current_chat_id = cid
+                            chat_data = api("get", f"/chats/{cid}")
+                            st.session_state.messages = chat_data.get("messages", []) if "messages" in chat_data else []
+                            st.rerun()
 
-        st.markdown('</div>', unsafe_allow_html=True)
+            with col_rename:
+                st.markdown('<div class="del-btn">', unsafe_allow_html=True)
+                if is_editing:
+                    if st.button("Save", key=f"save_{cid}", help="Save conversation name"):
+                        new_name = st.session_state.get(f"edit_name_{cid}", "").strip()
+                        if new_name:
+                            result = api("patch", f"/chats/{cid}", json={"name": new_name})
+                            if "error" not in result:
+                                load_chats()
+                                st.session_state.editing_chat_id = None
+                                st.session_state.current_chat_id = cid
+                                st.rerun()
+                        else:
+                            st.toast("Name cannot be empty", icon="⚠️")
+                else:
+                    if st.button("✎", key=f"rename_{cid}", help="Rename conversation"):
+                        st.session_state.editing_chat_id = cid
+                        st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
+
+            with col_del:
+                st.markdown('<div class="del-btn">', unsafe_allow_html=True)
+                if st.button("🗑", key=f"del_{cid}", help="Delete conversation"):
+                    api("delete", f"/chats/{cid}")
+                    if st.session_state.current_chat_id == cid:
+                        st.session_state.current_chat_id = None
+                        st.session_state.messages = []
+                    if st.session_state.editing_chat_id == cid:
+                        st.session_state.editing_chat_id = None
+                    load_chats()
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
     else:
         st.markdown("""
-        <div style="padding:1.5rem 0;text-align:center;color:var(--text-muted);font-size:0.85rem;">
+        <div style="padding:1rem 0.5rem;color:var(--text-muted);font-size:0.78rem;text-align:center;">
             No conversations yet
         </div>
         """, unsafe_allow_html=True)
 
     st.markdown('<div class="sb-divider"></div>', unsafe_allow_html=True)
-    st.markdown('<div class="sb-footer-label">Documents</div>', unsafe_allow_html=True)
-    st.file_uploader("Upload file", type=["pdf", "txt", "md"], key="doc_upload")
+    st.markdown('<div class="sb-label" style="padding-left:0.5rem;">Documents</div>', unsafe_allow_html=True)
 
-st.markdown("""
+    uploaded = st.file_uploader(
+        "Upload document",
+        type=["pdf", "txt", "md"],
+        key=f"doc_upload_{st.session_state.doc_upload_key}",
+        label_visibility="collapsed",
+    )
+
+    if uploaded is not None:
+        # Upload to backend
+        files = {"file": (uploaded.name, uploaded.getvalue(), uploaded.type)}
+        result = api("post", "/documents", files=files)
+        if "id" in result:
+            st.toast(f"✓ {uploaded.name} uploaded", icon="📄")
+            load_documents()
+            st.session_state.doc_upload_key += 1
+            st.rerun()
+        elif "error" in result:
+            st.toast(f"Upload failed: {result['error']}", icon="⚠️")
+
+    # Uploaded docs list
+    if st.session_state.documents:
+        for doc in st.session_state.documents:
+            status_cls = "doc-status-completed" if doc["status"] == "completed" else "doc-status-pending"
+            status_label = "✓" if doc["status"] == "completed" else "…"
+            col_name, col_del = st.columns([8, 2])
+            with col_name:
+                st.markdown(
+                    f'<div class="doc-item"><span class="doc-name">{doc["filename"]}</span>'
+                    f'<span class="{status_cls}">{status_label}</span></div>',
+                    unsafe_allow_html=True,
+                )
+            with col_del:
+                st.markdown('<div class="del-btn">', unsafe_allow_html=True)
+                if st.button("🗑", key=f"ddel_{doc['id']}", help="Delete document"):
+                    api("delete", f"/documents/{doc['id']}")
+                    load_documents()
+                    st.rerun()
+                st.markdown('</div>', unsafe_allow_html=True)
+
+
+
+current = st.session_state.current_chat_id
+chat_meta = st.session_state.chats_meta.get(current, {}) if current else {}
+chat_title = chat_meta.get("name", "Smat Agent") if current else "Smat Agent"
+
+st.markdown(f"""
 <div class="topbar">
-  <div class="topbar-title">Smat Agent</div>
+  <div>
+    <div class="topbar-title">{chat_title}</div>
+    <div class="topbar-sub">{'#' + current[:8] if current else 'No conversation selected'}</div>
+  </div>
+  <div class="status-pill"><div class="status-dot"></div>online</div>
 </div>
 """, unsafe_allow_html=True)
 
-if st.session_state.current_chat is None:
+if current is None:
     st.markdown("""
     <div class="empty-state">
         <div class="empty-title">Start a new conversation</div>
+        <div class="empty-sub">Give it a name and press<br>＋ New Conversation in the sidebar.</div>
     </div>
     """, unsafe_allow_html=True)
 else:
-    chat_id = st.session_state.current_chat
-    msgs = st.session_state.chats.get(chat_id, [])
+    msgs = st.session_state.messages
 
     if not msgs:
         st.markdown("""
         <div class="empty-state">
             <div class="empty-title">New conversation</div>
+            <div class="empty-sub">Type a message below to get started.</div>
         </div>
         """, unsafe_allow_html=True)
     else:
-        for message in msgs:
-            if message["role"] == "user":
-                st.chat_message("user").markdown(message["content"])
-            else:
-                st.chat_message("assistant").markdown(message["content"])
+        for m in msgs:
+            role = m.get("role", "user")
+            st.chat_message(role).markdown(m.get("content", ""))
 
-    user_input = st.chat_input("Type your message here...")
+    user_input = st.chat_input("Type your message…")
 
     if user_input:
-        add_message(chat_id, "user", user_input)
-        with st.chat_message("user"):
-            st.markdown(user_input)
-        reply = send_message(chat_id, user_input)
-        add_message(chat_id, "assistant", reply)
-        with st.chat_message("assistant"):
-            st.markdown(reply)
+        st.chat_message("user").markdown(user_input)
+        with st.spinner("Thinking…"):
+            result = api("post", f"/chats/{current}/messages", json={"message": user_input})
+        reply = result.get("reply", result.get("error", "No response"))
+        st.chat_message("assistant").markdown(reply)
+        st.session_state.messages = result.get("messages", st.session_state.messages + [
+            {"role": "user", "content": user_input},
+            {"role": "assistant", "content": reply},
+        ])
+        load_chats()
