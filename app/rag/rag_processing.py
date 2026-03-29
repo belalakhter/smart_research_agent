@@ -1,131 +1,91 @@
 import os
-import uuid
-import base64
+import asyncio
 import logging
-from typing import Optional
+from lightrag import LightRAG, QueryParam
+from lightrag.llm.openai import gpt_4o_mini_complete, openai_embed
+from lightrag.utils import setup_logger
 
+setup_logger("lightrag", level="INFO")
 logger = logging.getLogger(__name__)
 
-TRUSTGRAPH_URL = os.environ.get("TRUSTGRAPH_API_URL", "http://api-gateway:8088/")
-TRUSTGRAPH_TOKEN = os.environ.get("TRUSTGRAPH_API_SECRET", None)
 
-TRUSTGRAPH_FLOW = os.environ.get("TRUSTGRAPH_FLOW", "default")
+class LiteRAGService:
+    def __init__(self, working_dir: str = "./rag_storage"):
+        self.working_dir = working_dir
 
-TRUSTGRAPH_COLLECTION = os.environ.get("TRUSTGRAPH_COLLECTION", "default")
+        if not os.environ.get("OPENAI_API_KEY"):
+            raise ValueError("OPENAI_API_KEY environment variable is not set.")
 
-def _get_api():
-    """Return a connected TrustGraph Api client."""
-    from trustgraph.api import Api
-    return Api(url=TRUSTGRAPH_URL, token=TRUSTGRAPH_TOKEN)
+        if not os.path.exists(self.working_dir):
+            os.makedirs(self.working_dir)
 
+        self.rag = LightRAG(
+            working_dir=self.working_dir,
+            llm_model_func=gpt_4o_mini_complete,
+            embedding_func=openai_embed,
+        )
 
-def _get_flow():
-    """Return the configured TrustGraph flow handle."""
-    return _get_api().flow().id(TRUSTGRAPH_FLOW)
+    async def initialize(self):
+        await self.rag.initialize_storages()
 
+    async def insert_text(self, text: str):
+        await self.rag.ainsert(text)
 
-class TrustGraphRAGService:
-    """
-    Thin wrapper around the TrustGraph Python API.
-    """
+    async def query(self, question: str, mode: str = "hybrid") -> str:
+        return await self.rag.aquery(
+            question,
+            param=QueryParam(mode=mode),
+        )
 
-    def __init__(
-        self,
-        flow_id: str = TRUSTGRAPH_FLOW,
-        collection: str = TRUSTGRAPH_COLLECTION,
-    ):
-        self.flow_id = flow_id
-        self.collection = collection
+    async def finalize(self):
+        await self.rag.finalize_storages()
 
-    def _flow(self):
-        return _get_api().flow().id(self.flow_id)
-
-    def query(self, question: str) -> str:
-        """
-        Run a Graph RAG query against TrustGraph.
-        """
-        try:
-            response = self._flow().graph_rag(
-                query=question,
-                collection=self.collection,
-            )
-            return response
-        except Exception as e:
-            logger.error(f"[TrustGraphRAG] graph_rag query failed: {e}")
-            raise
-
-    def query_streaming(self, question: str):
-        """
-        Streaming variant — yields answer chunks as they arrive.
-        Useful for SSE / streaming endpoints in your Flask/FastAPI app.
-        """
-        try:
-            flow = _get_api().socket().flow(self.flow_id)
-            for chunk in flow.graph_rag(
-                query=question,
-                collection=self.collection,
-                streaming=True,
-            ):
-                yield chunk
-        except Exception as e:
-            logger.error(f"[TrustGraphRAG] streaming graph_rag failed: {e}")
-            raise
-
-    def insert_text(self, text: str, doc_id: Optional[str] = None) -> str:
-        """
-        Load plain text into TrustGraph for a given flow + collection.
-        """
-        if doc_id is None:
-            doc_id = f"urn:doc:{uuid.uuid4()}"
-
-        encoded = base64.b64encode(text.encode("utf-8")).decode("utf-8")
-
-        try:
-            lib = _get_api().library()
-            lib.add_document(
-                id=doc_id,
-                text=encoded,
-                kind="text/plain",
-            )
-            logger.info(f"[TrustGraphRAG] uploaded doc {doc_id} to library")
-
-            _get_api().library().start_processing(
-                flow_id=self.flow_id,
-                document_id=doc_id,
-                collection=self.collection,
-                processing_id=f"urn:proc:{uuid.uuid4()}",
-            )
-            logger.info(f"[TrustGraphRAG] processing started for {doc_id}")
-            return doc_id
-
-        except Exception as e:
-            logger.error(f"[TrustGraphRAG] insert_text failed for {doc_id}: {e}")
-            raise
 
 def ingest_document(doc_id: str, raw_bytes: bytes, filename: str) -> None:
     """
-    Decode raw file bytes to text and ingest into TrustGraph.
+    Decode raw file bytes to text and insert into LightRAG.
+    Called by app/services/worker_threads.py in a background thread.
+    Updates document status in the DB: pending -> processing -> done/failed.
+
+    Uses a fresh event loop per call to avoid conflicts with Flask's event loop
+    or any existing loop running in the worker thread.
     """
-    _mark_status(doc_id, "processing")
+    async def _run():
+        _mark_status(doc_id, "processing")
 
-    try:
-        if filename.lower().endswith(".pdf"):
-            text = _extract_pdf_text(raw_bytes)
-        else:
-            text = raw_bytes.decode("utf-8", errors="ignore")
-    except Exception as e:
-        logger.error(f"[ingest] decode failed for {filename}: {e}")
-        _mark_status(doc_id, "failed")
-        return
+        rag_service = LiteRAGService()
+        await rag_service.initialize()
 
+        try:
+            if filename.lower().endswith(".pdf"):
+                text = _extract_pdf_text(raw_bytes)
+            else:
+                text = raw_bytes.decode("utf-8", errors="ignore")
+        except Exception as e:
+            logger.error(f"[ingest] decode failed for {filename}: {e}")
+            await rag_service.finalize()
+            _mark_status(doc_id, "failed")
+            return
+
+        try:
+            await rag_service.insert_text(text)
+            logger.info(f"[ingest] {filename} ({doc_id}) indexed successfully")
+            _mark_status(doc_id, "done")
+        except Exception as e:
+            logger.error(f"[ingest] insert failed for {filename}: {e}")
+            _mark_status(doc_id, "failed")
+        finally:
+            await rag_service.finalize()
+
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     try:
-        svc = TrustGraphRAGService()
-        svc.insert_text(text, doc_id=doc_id)
-        logger.info(f"[ingest] {filename} ({doc_id}) submitted to TrustGraph")
-        _mark_status(doc_id, "done")
+        loop.run_until_complete(_run())
     except Exception as e:
-        logger.error(f"[ingest] TrustGraph ingest failed for {filename}: {e}")
+        logger.error(f"[ingest] Unhandled error for {doc_id}: {e}")
         _mark_status(doc_id, "failed")
+    finally:
+        loop.close()
 
 
 def _extract_pdf_text(raw_bytes: bytes) -> str:
@@ -151,6 +111,8 @@ def _mark_status(doc_id: str, status: str) -> None:
             "processing": StatusEnum.processing,
             "done":       StatusEnum.done,
             "failed":     StatusEnum.failed,
+            "ready":      StatusEnum.done,
+            "error":      StatusEnum.failed,
         }
         status_val = status_map.get(status, StatusEnum.failed)
 
