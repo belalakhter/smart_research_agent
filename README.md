@@ -1,17 +1,13 @@
-PDF / Docs
-    ↓
-Mistral OCR (API)
-    ↓
-Clean Markdown / JSON
-    ↓
-Chunking + Embeddings
-    ↓
-Vector DB (FAISS/Chroma)
-    ↓
-Graphiti (memory + relationships)
-    ↓
-FalkorDB (graph storage)
-    ↓
-LLM (chat)
-    ↓
-KV store (chat messages)
+## Features
+
+- Highly Fast Document Ingestion
+- Research optimized intelligent Answer
+- Formatted structured Response
+- Graph knowledge based RAG
+
+## Tech Stack
+
+-  Flask WSGI
+- Falkor DB and Graphiti
+- LangGraph based agent state
+- Mistral OCR and OPEN AI LLM

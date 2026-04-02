@@ -18,7 +18,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 
 COPY . .
 
-EXPOSE 8080
+EXPOSE 4000
 
 CMD ["gunicorn", \
     "--workers=4", \
@@ -27,5 +27,5 @@ CMD ["gunicorn", \
     "--timeout=120", \
     "--preload", \
     "--config=gunicorn.conf.py", \
-    "--bind=0.0.0.0:8080", \
+    "--bind=0.0.0.0:4000", \
     "app.main:app"]

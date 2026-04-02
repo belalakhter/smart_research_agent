@@ -6,7 +6,7 @@ import logging
 import os
 import uuid
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 
 from app.services.logger import get_logger
 
@@ -107,6 +107,7 @@ class GraphitiRAGService:
                 return
 
             from graphiti_core import Graphiti
+            from graphiti_core.nodes import EpisodicNode, EntityNode
             from graphiti_core.driver.falkordb_driver import FalkorDriver
             from app.llm.llm_client import get_graphiti_llm_client, get_graphiti_embedder
 
@@ -114,7 +115,11 @@ class GraphitiRAGService:
             port = int(os.environ.get("FALKORDB_PORT", "6379"))
 
             logger.info(f"[rag] Connecting to FalkorDB at {host}:{port}")
-            driver = FalkorDriver(host=host, port=port)
+            driver = FalkorDriver(
+                host=host, 
+                port=port, 
+                database="graphiti"
+            )
             self.graphiti = Graphiti(
                 graph_driver=driver,
                 llm_client=get_graphiti_llm_client(),
@@ -125,7 +130,7 @@ class GraphitiRAGService:
     async def initialize(self) -> None:
         await self._ensure_initialized()
 
-    async def insert_document(self, doc_id: str, text: str, filename: str = "") -> None:
+    async def insert_document(self, doc_id: str, text: str, filename: str = "", group_id: str = "default") -> None:
         await self._ensure_initialized()
         if self.graphiti:
             await self.graphiti.add_episode(
@@ -133,36 +138,94 @@ class GraphitiRAGService:
                 episode_body=text,
                 source_description="Financial Document",
                 reference_time=datetime.now(),
-                group_id=doc_id,
+                group_id=group_id,
             )
 
-    async def query(self, question: str, mode: str = "graph") -> str:
+    async def query(self, question: str, mode: str = "graph", group_ids: Optional[List[str]] = None) -> str:
         await self._ensure_initialized()
         if not self.graphiti:
             return "[Graphiti not initialized]"
 
+        effective_group_ids = group_ids if group_ids else None
+        if group_ids is not None and len(group_ids) == 0:
+            logger.info(f"[rag] No chat-doc mapping found, searching across all documents")
+
         limit = 5 if mode == "graph" else 10
         try:
-            search_results = await self.graphiti.search(query=question, num_results=limit)
+            search_results = await self.graphiti.search(
+                query=question, 
+                num_results=limit,
+                group_ids=effective_group_ids
+            )
         except Exception as e:
             logger.error(f"Graphiti search failed for question '{question}': {e}", exc_info=True)
             return f"[Search failed due to technical error: {str(e)}]"
 
         if not search_results:
+            logger.warning(f"[rag] No relevant context found in Graphiti for query: {question} (groups: {effective_group_ids})")
             return "[No relevant context found]"
 
-        return "\n".join(f"- {res}" for res in search_results)
+        logger.info(f"[rag] Found {len(search_results)} search results for: {question}")
+        facts = [edge.fact for edge in search_results if edge.fact]
+        if not facts:
+            logger.warning(f"[rag] Search returned {len(search_results)} edges but none had facts")
+            return "[No relevant context found]"
+        return "\n".join(f"- {fact}" for fact in facts)
 
     async def finalize(self) -> None:
         pass
 
     async def delete_document(self, doc_id: str) -> None:
-        """Remove document data from FalkorDB using group_id."""
         await self._ensure_initialized()
-        if self.graphiti:
-            # Graphiti uses group_id to partition entries
-            await self.graphiti.clear_group(group_id=doc_id)
-            logger.info(f"[rag] Document {doc_id} cleared from graph")
+        if not self.graphiti:
+            logger.warning(f"[rag] Graphiti not initialized, cannot delete {doc_id}")
+            return
+
+        driver = self.graphiti.driver
+        try:
+            await driver.client.select_graph(doc_id).delete()
+            logger.info(f"[rag] Isolated graph '{doc_id}' deleted from FalkorDB")
+        except Exception as e:
+            logger.debug(f"[rag] No isolated graph found for '{doc_id}' or already deleted: {e}")
+
+        try:
+            await driver.execute_query(
+                """
+                MATCH (e:Episodic {group_id: $group_id})-[r]-()
+                DELETE r
+                """,
+                group_id=doc_id,
+            )
+            await driver.execute_query(
+                """
+                MATCH (e:Episodic {group_id: $group_id})
+                DELETE e
+                """,
+                group_id=doc_id,
+            )
+
+            await driver.execute_query(
+                """
+                MATCH (n:Entity {group_id: $group_id})
+                WHERE NOT (n)--(:Episodic)
+                DETACH DELETE n
+                """,
+                group_id=doc_id,
+            )
+
+            await driver.execute_query(
+                """
+                MATCH ()-[r {group_id: $group_id}]-()
+                DELETE r
+                """,
+                group_id=doc_id,
+            )
+
+            logger.info(f"[rag] Document {doc_id} fully cleared from graph")
+
+        except Exception as e:
+            logger.error(f"[rag] Failed to delete document {doc_id} from graph: {e}", exc_info=True)
+            raise
 
 
 HybridRAGService = GraphitiRAGService
@@ -248,6 +311,7 @@ async def _ingest_async(doc_id: str, raw_bytes: bytes, filename: str) -> None:
                         doc_id=chunk_id,
                         text=chunk,
                         filename=chunk_label,
+                        group_id=doc_id, 
                     )
                     success_count += 1
                 except Exception as e:
@@ -278,14 +342,6 @@ def ingest_document(doc_id: str, raw_bytes: bytes, filename: str) -> None:
     from app.services.worker_threads import submit_async
     logger.info(f"[ingest] Queuing background ingest: {filename} ({doc_id})")
     submit_async(_ingest_async(doc_id, raw_bytes, filename))
-def delete_document_data(doc_id: str) -> None:
-    """
-    Fire-and-forget deletion of document data from the RAG graph.
-    """
-    from app.services.worker_threads import submit_async
-    logger.info(f"[ingest] Queuing background deletion: {doc_id}")
-    submit_async(_delete_document_async(doc_id))
-
 
 async def _delete_document_async(doc_id: str) -> None:
     """Async task to delete document from RAG service."""
@@ -294,3 +350,12 @@ async def _delete_document_async(doc_id: str) -> None:
         await rag.delete_document(doc_id)
     except Exception as e:
         logger.error(f"[ingest] Failed to delete document {doc_id} from graph: {e}", exc_info=True)
+
+def delete_document_data(doc_id: str) -> None:
+    """
+    Remove all data for a document from the RAG graph.
+    Fire-and-forget background task.
+    """
+    from app.services.worker_threads import submit_async
+    logger.info(f"[rag] Queuing cleanup for doc: {doc_id}")
+    submit_async(_delete_document_async(doc_id))

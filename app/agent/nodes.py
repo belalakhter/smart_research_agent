@@ -1,4 +1,3 @@
-import asyncio
 import logging
 import json
 
@@ -18,9 +17,17 @@ logger = logging.getLogger(__name__)
 
 
 def node_prepare(state: AgentState) -> AgentState:
-    """Extract information and trim history."""
+    """Extract information, trim history, and load available docs."""
     state.last_user_message = last_user_message(state.messages)
     state.messages = trim_messages(state.messages)
+    
+    from app.services.map_store import doc_map
+    state.available_doc_ids = doc_map.get_docs(state.chat_id)
+    state.has_documents = len(state.available_doc_ids) > 0
+    
+    if state.has_documents:
+        logger.info(f"[prepare] Chat {state.chat_id} has {len(state.available_doc_ids)} docs.")
+    
     return state
 
 
@@ -66,7 +73,11 @@ def node_rag_semantic(state: AgentState) -> AgentState:
     if state.strategy != "A" or not state.search_query:
         return state
 
-    state.rag_context = _sync_rag_query(state.search_query, mode="hybrid")
+    state.rag_context = _sync_rag_query(
+        state.search_query, 
+        mode="hybrid", 
+        doc_ids=state.available_doc_ids
+    )
     return state
 
 
@@ -74,39 +85,29 @@ def node_rag_graph(state: AgentState) -> AgentState:
     """Strategy B: Pure Graph context without history dependence."""
     if state.strategy != "B" or not state.search_query:
         return state
-    state.rag_context = _sync_rag_query(state.search_query, mode="graph")
+    state.rag_context = _sync_rag_query(
+        state.search_query, 
+        mode="graph", 
+        doc_ids=state.available_doc_ids
+    )
     return state
 
 
-def _sync_rag_query(query: str, mode: str) -> str:
+def _sync_rag_query(query: str, mode: str, doc_ids: list[str] = None) -> str:
     try:
-        from app.rag.rag_processing import HybridRAGService
-        rag = HybridRAGService()
-        
-        try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                import concurrent.futures
-                with concurrent.futures.ThreadPoolExecutor() as pool:
-                    future = pool.submit(asyncio.run, _rag_call(rag, query, mode))
-                    context = future.result(timeout=15)
-            else:
-                context = loop.run_until_complete(_rag_call(rag, query, mode))
-        except RuntimeError:
-            context = asyncio.run(_rag_call(rag, query, mode))
-            
+        from app.services.worker_threads import submit_async
+        from app.rag.rag_processing import _get_rag_service
+
+        async def _do_query():
+            rag = await _get_rag_service()
+            return await rag.query(query, mode=mode, group_ids=doc_ids)
+
+        context = submit_async(_do_query(), wait=True, timeout=30)
         if context and "[No relevant" not in context:
             return RAG_CONTEXT_TEMPLATE.format(context=context)
     except Exception as e:
-        logger.warning(f"RAG query failed: {e}")
+        logger.warning(f"RAG query failed: {e}", exc_info=True)
     return ""
-
-
-async def _rag_call(rag, query: str, mode: str) -> str:
-    await rag.initialize()
-    result = await rag.query(query, mode=mode)
-    await rag.finalize()
-    return result
 
 
 def node_web_search(state: AgentState) -> AgentState:

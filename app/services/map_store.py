@@ -74,4 +74,30 @@ class ChatKVStore:
         except Exception as e:
             logger.error(f"[ChatKVStore] clear failed: {e}")
 
+class DocMapStore:
+    """
+    Redis-backed store mapping chat_ids to their uploaded doc_ids.
+    """
+    def _key(self, chat_id: str) -> str:
+        return f"smart_agent:chat:{chat_id}:docs"
+
+    def link(self, chat_id: str, doc_id: str) -> None:
+        """Add a doc_id to a chat_id's set."""
+        try:
+            r = get_redis()
+            r.sadd(self._key(chat_id), doc_id)
+        except Exception as e:
+            logger.error(f"[DocMapStore] link failed: {e}")
+
+    def get_docs(self, chat_id: str) -> List[str]:
+        """Get all doc_ids for a chat_id."""
+        try:
+            r = get_redis()
+            res = r.smembers(self._key(chat_id))
+            return [d.decode('utf-8') if isinstance(d, bytes) else str(d) for d in res]
+        except Exception as e:
+            logger.error(f"[DocMapStore] get_docs failed: {e}")
+            return []
+
 chat_store = ChatKVStore()
+doc_map = DocMapStore()

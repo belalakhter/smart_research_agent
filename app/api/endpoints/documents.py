@@ -11,6 +11,7 @@ from app.database.document_store import (
     set_document_status,
 )
 
+from app.services.map_store import chat_store
 from app.services.logger import get_logger
 
 logger = get_logger(__name__)
@@ -67,20 +68,25 @@ def upload_document():
 
     raw = f.read()
     filename = f.filename
+    chat_id = request.form.get("chat_id")
 
     doc_id = uuid.uuid4().hex
 
     try:
         create_document(doc_id, filename, raw, status="pending")
+        if chat_id:
+            from app.services.map_store import doc_map
+            doc_map.link(chat_id, doc_id)
+            logger.info(f"[upload] Linked doc {doc_id} to chat {chat_id}")
     except Exception as e:
-        logger.error(f"[upload] FalkorDB error saving document: {e}")
+        logger.error(f"[upload] FalkorDB or Redis error saving document: {e}")
         return jsonify({"error": str(e)}), 500
 
     try:
         from app.services.worker_threads import submit_async
-        from app.rag.rag_processing import _ingest_async
-
-        submit_async(_ingest_async(doc_id, raw, filename))
+        from app.rag.rag_processing import ingest_document
+        
+        ingest_document(doc_id, raw, filename)
         logger.info(f"[upload] Ingestion queued for doc {doc_id} ({filename})")
     except Exception as e:
         logger.error(f"[upload] Failed to queue ingestion for {doc_id}: {e}")

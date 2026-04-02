@@ -509,7 +509,7 @@ body {
 }
 
 #messages {
-  max-width: 850px;
+  width: min(1100px, 92%);
   margin: 0 auto;
   padding: 0 32px;
   display: flex;
@@ -596,6 +596,53 @@ body {
 
 .thinking-dots span:nth-child(2) {
   animation-delay: 0.2s;
+}
+
+.msg-row.document {
+  margin: 16px 0;
+  display: flex;
+  justify-content: center;
+}
+
+.doc-insight-card {
+  background: var(--c-surface);
+  border: 1px solid var(--c-border);
+  border-radius: var(--r-md);
+  padding: 12px 20px;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  box-shadow: var(--shadow-sm);
+  transition: transform 0.2s ease;
+}
+
+.doc-insight-card:hover {
+  border-color: var(--c-primary-light);
+  transform: translateY(-1px);
+}
+
+.doc-insight-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--c-primary);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.doc-insight-body {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--c-text);
+  word-break: break-all;
+}
+
+@keyframes blink {
+  0%, 100% { opacity: 0.3; }
+  50% { opacity: 1; }
 }
 
 .thinking-dots span:nth-child(3) {
@@ -731,7 +778,7 @@ body {
 }
 
 .input-wrap {
-  max-width: 800px;
+  width: min(1100px, 92%);
   margin: 0 auto;
   display: flex;
   align-items: flex-end;

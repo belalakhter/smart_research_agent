@@ -27,7 +27,7 @@ services:
       dockerfile: Dockerfile
     container_name: smart_agent_dev
     ports:
-      - "8081:8081"
+      - "4000:4000"
     env_file:
       - .env
     volumes:

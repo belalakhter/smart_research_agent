@@ -12,6 +12,11 @@ from app.agent.nodes import (
 
 logger = logging.getLogger(__name__)
 
+def router_condition(state: AgentState):
+    if state.strategy == "B":
+        return "rag_graph"
+    return "rag_semantic"
+
 def create_graph():
     workflow = StateGraph(AgentState)
 
@@ -25,8 +30,16 @@ def create_graph():
     workflow.set_entry_point("prepare")
     workflow.add_edge("prepare", "router")
 
-    workflow.add_edge("router", "rag_semantic")
-    workflow.add_edge("rag_semantic", "rag_graph")
+    workflow.add_conditional_edges(
+        "router",
+        router_condition,
+        {
+            "rag_semantic": "rag_semantic",
+            "rag_graph": "rag_graph"
+        }
+    )
+
+    workflow.add_edge("rag_semantic", "web_search")
     workflow.add_edge("rag_graph", "web_search")
     workflow.add_edge("web_search", "llm")
     workflow.add_edge("llm", END)

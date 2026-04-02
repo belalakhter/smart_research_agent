@@ -68,8 +68,11 @@ function updateTopbar() {
 function appendMessage(role, content) {
   const c = document.getElementById('messages'), row = document.createElement('div');
   row.className = `msg-row ${role}`;
-  if (role === 'assistant') row.innerHTML = `<img src="/assets/icon.png" class="msg-avatar" alt="S"><div class="msg-content">${renderMarkdown(content)}</div>`;
-  else row.innerHTML = `<div class="msg-content">${escHtml(content)}</div>`;
+  if (role === 'assistant') {
+    row.innerHTML = `<img src="/assets/icon.png" class="msg-avatar" alt="S"><div class="msg-content">${renderMarkdown(content)}</div>`;
+  } else {
+    row.innerHTML = `<div class="msg-content">${escHtml(content)}</div>`;
+  }
   c.appendChild(row); scrollToBottom();
 }
 function showThinking() {
@@ -268,10 +271,13 @@ async function uploadDocument(file) {
   }
   const label = document.getElementById('upload-label'), labelText = document.getElementById('upload-label-text');
   label.classList.add('uploading'); labelText.textContent = 'Uploading…';
-  const fd = new FormData(); fd.append('file', file);
+  const fd = new FormData(); 
+  fd.append('file', file);
+  if (state.currentChatId) fd.append('chat_id', state.currentChatId);
   try {
     const res = await apiFetch('POST', '/documents', fd, true);
-    state.docs.unshift(res); renderDocList(); toast(`"${res.filename}" uploaded`, 'success');
+    await loadDocs(); 
+    toast(`"${res.filename}" uploaded`, 'success');
   } catch (e) { toast('Upload failed: ' + e.message, 'error'); }
   finally { label.classList.remove('uploading'); labelText.textContent = 'Browse files'; document.getElementById('file-input').value = ''; }
 }
