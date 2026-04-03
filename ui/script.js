@@ -31,17 +31,214 @@ function toast(msg, type = 'info') {
 function escHtml(s) {
   return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
+
+function sanitizeUrl(url) {
+  const value = String(url || '').trim();
+  if (/^(https?:\/\/|mailto:)/i.test(value)) return value;
+  return '#';
+}
+
+function renderInlineMarkdown(text) {
+  const tokens = [];
+  const withCodePlaceholders = escHtml(text).replace(/`([^`]+)`/g, (_, code) => {
+    const token = `@@TOKEN${tokens.length}@@`;
+    tokens.push(`<code>${code}</code>`);
+    return token;
+  });
+
+  const withLinkPlaceholders = withCodePlaceholders.replace(
+    /\[([^\]]+)\]\((https?:\/\/[^\s)]+|mailto:[^\s)]+)\)/g,
+    (_, label, url) => {
+      const token = `@@TOKEN${tokens.length}@@`;
+      tokens.push(
+        `<a href="${escHtml(sanitizeUrl(url))}" target="_blank" rel="noopener noreferrer">${label}</a>`,
+      );
+      return token;
+    },
+  );
+
+  return withLinkPlaceholders
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/(^|[\s(])\*([^*\n][^*\n]*?)\*(?=[\s).,!?:;]|$)/g, '$1<em>$2</em>')
+    .replace(/@@TOKEN(\d+)@@/g, (_, index) => tokens[Number(index)] || '');
+}
+
+function splitTableRow(line) {
+  return line
+    .trim()
+    .replace(/^\|/, '')
+    .replace(/\|$/, '')
+    .split('|')
+    .map(cell => cell.trim());
+}
+
+function isTableDividerLine(line) {
+  const trimmed = line.trim();
+  if (!trimmed || !trimmed.includes('|')) return false;
+  return splitTableRow(trimmed).every(cell => /^:?-{3,}:?$/.test(cell));
+}
+
+function isTableCandidate(line) {
+  const trimmed = line.trim();
+  if (!trimmed || !trimmed.includes('|')) return false;
+  return splitTableRow(trimmed).length >= 2;
+}
+
+function tableAlignments(separatorLine) {
+  return splitTableRow(separatorLine).map(cell => {
+    if (cell.startsWith(':') && cell.endsWith(':')) return 'center';
+    if (cell.endsWith(':')) return 'right';
+    return 'left';
+  });
+}
+
+function renderMarkdownTable(lines, startIndex) {
+  const headers = splitTableRow(lines[startIndex]);
+  const aligns = tableAlignments(lines[startIndex + 1]);
+  const rows = [];
+  let index = startIndex + 2;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!isTableCandidate(line) || !line.trim()) break;
+    rows.push(splitTableRow(line));
+    index += 1;
+  }
+
+  const thead = `<thead><tr>${headers.map((cell, cellIndex) => (
+    `<th style="text-align:${aligns[cellIndex] || 'left'}">${renderInlineMarkdown(cell)}</th>`
+  )).join('')}</tr></thead>`;
+
+  const tbody = rows.length
+    ? `<tbody>${rows.map(row => `<tr>${row.map((cell, cellIndex) => (
+      `<td data-label="${escHtml(headers[cellIndex] || '')}" style="text-align:${aligns[cellIndex] || 'left'}">${renderInlineMarkdown(cell)}</td>`
+    )).join('')}</tr>`).join('')}</tbody>`
+    : '';
+
+  return {
+    html: `<div class="md-table-wrap"><table class="md-table">${thead}${tbody}</table></div>`,
+    nextIndex: index,
+  };
+}
+
+function isListItem(line, ordered = false) {
+  return ordered
+    ? /^\s*\d+\.\s+/.test(line)
+    : /^\s*[-*]\s+/.test(line);
+}
+
+function stripListMarker(line, ordered = false) {
+  return ordered
+    ? line.replace(/^\s*\d+\.\s+/, '')
+    : line.replace(/^\s*[-*]\s+/, '');
+}
+
 function renderMarkdown(text) {
   if (!text) return '';
-  let h = text
-    .replace(/```(\w*)\n([\s\S]*?)```/g, (_, l, c) => `<pre><code class="lang-${l}">${escHtml(c.trim())}</code></pre>`)
-    .replace(/`([^`]+)`/g, (_, c) => `<code>${escHtml(c)}</code>`)
-    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-    .replace(/^### (.+)$/gm, '<h3>$1</h3>')
-    .replace(/^## (.+)$/gm, '<h2>$1</h2>')
-    .replace(/^# (.+)$/gm, '<h1>$1</h1>')
-    .replace(/\n\n+/g, '</p><p>').replace(/\n/g, '<br>');
-  return `<p>${h}</p>`;
+  const lines = String(text).replace(/\r\n/g, '\n').split('\n');
+  const blocks = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    const trimmed = line.trim();
+
+    if (!trimmed) {
+      index += 1;
+      continue;
+    }
+
+    if (trimmed.startsWith('```')) {
+      const lang = trimmed.slice(3).trim();
+      const codeLines = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trim().startsWith('```')) {
+        codeLines.push(lines[index]);
+        index += 1;
+      }
+      if (index < lines.length) index += 1;
+      blocks.push(`<pre><code class="lang-${escHtml(lang)}">${escHtml(codeLines.join('\n').trim())}</code></pre>`);
+      continue;
+    }
+
+    const headingMatch = line.match(/^(#{1,3})\s+(.*)$/);
+    if (headingMatch) {
+      const level = headingMatch[1].length;
+      blocks.push(`<h${level}>${renderInlineMarkdown(headingMatch[2].trim())}</h${level}>`);
+      index += 1;
+      continue;
+    }
+
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(trimmed)) {
+      blocks.push('<hr>');
+      index += 1;
+      continue;
+    }
+
+    if (
+      index + 1 < lines.length &&
+      isTableCandidate(line) &&
+      isTableDividerLine(lines[index + 1])
+    ) {
+      const table = renderMarkdownTable(lines, index);
+      blocks.push(table.html);
+      index = table.nextIndex;
+      continue;
+    }
+
+    if (isListItem(line, false) || isListItem(line, true)) {
+      const ordered = isListItem(line, true);
+      const tag = ordered ? 'ol' : 'ul';
+      const items = [];
+      while (index < lines.length && isListItem(lines[index], ordered)) {
+        items.push(`<li>${renderInlineMarkdown(stripListMarker(lines[index], ordered))}</li>`);
+        index += 1;
+      }
+      blocks.push(`<${tag}>${items.join('')}</${tag}>`);
+      continue;
+    }
+
+    if (/^>\s?/.test(trimmed)) {
+      const quoteLines = [];
+      while (index < lines.length && /^>\s?/.test(lines[index].trim())) {
+        quoteLines.push(lines[index].trim().replace(/^>\s?/, ''));
+        index += 1;
+      }
+      blocks.push(`<blockquote><p>${quoteLines.map(renderInlineMarkdown).join('<br>')}</p></blockquote>`);
+      continue;
+    }
+
+    const paragraphLines = [];
+    while (index < lines.length) {
+      const current = lines[index];
+      const currentTrimmed = current.trim();
+      const nextLine = lines[index + 1];
+
+      if (!currentTrimmed) break;
+      if (currentTrimmed.startsWith('```')) break;
+      if (/^(#{1,3})\s+/.test(currentTrimmed)) break;
+      if (isListItem(current, false) || isListItem(current, true)) break;
+      if (
+        nextLine &&
+        isTableCandidate(current) &&
+        isTableDividerLine(nextLine)
+      ) {
+        break;
+      }
+
+      paragraphLines.push(renderInlineMarkdown(currentTrimmed));
+      index += 1;
+    }
+
+    if (paragraphLines.length) {
+      blocks.push(`<p>${paragraphLines.join('<br>')}</p>`);
+      continue;
+    }
+
+    index += 1;
+  }
+
+  return blocks.join('');
 }
 function autoResize(ta) { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 180) + 'px'; }
 function scrollToBottom() { const a = document.getElementById('chat-area'); a.scrollTop = a.scrollHeight; }

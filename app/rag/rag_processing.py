@@ -1,35 +1,244 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 import io
-import logging
 import os
+import re
+import time
 import uuid
-from datetime import datetime
-from typing import Optional, List
+from datetime import datetime, timezone
+from typing import Any, Optional, List
 
 from app.services.logger import get_logger
 
 logger = get_logger(__name__)
 
-CHUNK_SIZE         = int(os.environ.get("RAG_CHUNK_SIZE",        "5000"))
-CHUNK_OVERLAP      = int(os.environ.get("RAG_CHUNK_OVERLAP",      "200"))
-INGEST_CONCURRENCY = int(os.environ.get("RAG_INGEST_CONCURRENCY", "20"))
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(f"[rag] Invalid integer for {name}: {raw!r}; using {default}")
+        return default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+CHUNK_SIZE = max(1500, _env_int("RAG_CHUNK_SIZE", 12000))
+CHUNK_OVERLAP = max(0, min(CHUNK_SIZE // 2, _env_int("RAG_CHUNK_OVERLAP", 800)))
+INGEST_CONCURRENCY = max(1, _env_int("RAG_INGEST_CONCURRENCY", 1))
+MIN_CHUNK_MERGE_SIZE = max(600, _env_int("RAG_MIN_CHUNK_MERGE_SIZE", min(1800, CHUNK_SIZE // 5)))
+MAX_MERGED_CHUNK_SIZE = max(CHUNK_SIZE, _env_int("RAG_MAX_MERGED_CHUNK_SIZE", CHUNK_SIZE + CHUNK_OVERLAP))
+GRAPHITI_MAX_COROUTINES = max(
+    1,
+    _env_int("GRAPHITI_MAX_COROUTINES", _env_int("SEMAPHORE_LIMIT", 10)),
+)
+GRAPHITI_BUILD_INDICES = _env_bool("GRAPHITI_BUILD_INDICES", True)
+GRAPHITI_ENABLE_SAGA = _env_bool("GRAPHITI_ENABLE_SAGA", True)
+GRAPHITI_USE_ADVANCED_SEARCH = _env_bool("GRAPHITI_USE_ADVANCED_SEARCH", True)
+GRAPHITI_GRAPH_SEARCH_LIMIT = max(1, _env_int("GRAPHITI_GRAPH_SEARCH_LIMIT", 8))
+GRAPHITI_HYBRID_SEARCH_LIMIT = max(1, _env_int("GRAPHITI_HYBRID_SEARCH_LIMIT", 12))
+GRAPHITI_FACT_LIMIT = max(1, _env_int("GRAPHITI_CONTEXT_FACT_LIMIT", 12))
+GRAPHITI_NODE_LIMIT = max(0, _env_int("GRAPHITI_CONTEXT_NODE_LIMIT", 8))
+GRAPHITI_EPISODE_LIMIT = max(0, _env_int("GRAPHITI_CONTEXT_EPISODE_LIMIT", 4))
+GRAPHITI_COMMUNITY_LIMIT = max(0, _env_int("GRAPHITI_CONTEXT_COMMUNITY_LIMIT", 2))
+PDF_OCR_MODE = os.environ.get("PDF_OCR_MODE", "auto").strip().lower()
+PDF_DIRECT_TEXT_MIN_CHARS = max(100, _env_int("PDF_DIRECT_TEXT_MIN_CHARS", 600))
+
+DEFAULT_GRAPHITI_EXTRACTION_INSTRUCTIONS = (
+    "Extract densely and preserve retrieval value. Create entities for materially relevant "
+    "people, organizations, products, systems, processes, document sections, policies, risks, "
+    "controls, metrics, dates, amounts, and domain-specific terms. Keep exact numbers, dates, "
+    "units, and qualifiers in facts. Prefer distinct nodes for distinct concepts instead of "
+    "collapsing them into generic summaries, and only merge entities when they clearly refer "
+    "to the same real-world thing."
+)
+GRAPHITI_EXTRACTION_INSTRUCTIONS = os.environ.get(
+    "GRAPHITI_EXTRACTION_INSTRUCTIONS",
+    DEFAULT_GRAPHITI_EXTRACTION_INSTRUCTIONS,
+).strip()
+
+_SENTENCE_BOUNDARY_RE = re.compile(r"(?<=[.!?])\s+(?=[A-Z0-9])")
+
+
+def _normalize_document_text(text: str) -> str:
+    if not text:
+        return ""
+
+    lines: list[str] = []
+    blank_streak = 0
+    cleaned = text.replace("\x00", "").replace("\u000c", "\n")
+    for raw_line in cleaned.splitlines():
+        line = re.sub(r"[ \t]+", " ", raw_line).strip()
+        if line:
+            blank_streak = 0
+            lines.append(line)
+        elif blank_streak == 0:
+            lines.append("")
+            blank_streak = 1
+
+    return "\n".join(lines).strip()
+
+
+def _split_large_unit(unit: str, chunk_size: int) -> list[str]:
+    unit = unit.strip()
+    if not unit:
+        return []
+    if len(unit) <= chunk_size:
+        return [unit]
+
+    parts = [part.strip() for part in _SENTENCE_BOUNDARY_RE.split(unit) if part.strip()]
+    if len(parts) <= 1:
+        parts = [part.strip() for part in unit.splitlines() if part.strip()]
+    if len(parts) <= 1:
+        return [
+            unit[i : i + chunk_size].strip()
+            for i in range(0, len(unit), chunk_size)
+            if unit[i : i + chunk_size].strip()
+        ]
+
+    segments: list[str] = []
+    current: list[str] = []
+    current_len = 0
+
+    for part in parts:
+        if len(part) > chunk_size:
+            if current:
+                segments.append(" ".join(current).strip())
+                current = []
+                current_len = 0
+            segments.extend(_split_large_unit(part, chunk_size))
+            continue
+
+        separator_len = 1 if current else 0
+        if current and current_len + separator_len + len(part) > chunk_size:
+            segments.append(" ".join(current).strip())
+            current = [part]
+            current_len = len(part)
+            continue
+
+        current.append(part)
+        current_len += separator_len + len(part)
+
+    if current:
+        segments.append(" ".join(current).strip())
+
+    return segments
+
+
+def _take_overlap_units(units: list[str], overlap: int) -> list[str]:
+    if overlap <= 0 or not units:
+        return []
+
+    selected: list[str] = []
+    total = 0
+    for unit in reversed(units):
+        separator_len = 2 if selected else 0
+        projected = total + separator_len + len(unit)
+        if selected and projected > overlap:
+            break
+        selected.append(unit)
+        total = projected
+        if total >= overlap:
+            break
+
+    return list(reversed(selected))
 
 
 def _chunk_text(text: str, chunk_size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
-    text = text.strip()
+    text = _normalize_document_text(text)
     if not text:
         return []
+
+    units: list[str] = []
+    for block in re.split(r"\n{2,}", text):
+        block = block.strip()
+        if not block:
+            continue
+        units.extend(_split_large_unit(block, chunk_size))
+
+    if not units:
+        return []
+
     chunks: list[str] = []
-    start = 0
-    step = max(1, chunk_size - overlap)
-    while start < len(text):
-        chunk = text[start : start + chunk_size].strip()
-        if chunk:
-            chunks.append(chunk)
-        start += step
-    return chunks
+    current: list[str] = []
+    current_len = 0
+
+    for unit in units:
+        separator_len = 2 if current else 0
+        if current and current_len + separator_len + len(unit) > chunk_size:
+            chunks.append("\n\n".join(current).strip())
+            current = _take_overlap_units(current, overlap)
+            current_len = sum(len(part) for part in current) + (2 * max(0, len(current) - 1))
+
+        separator_len = 2 if current else 0
+        if current and current_len + separator_len + len(unit) > chunk_size:
+            chunks.append(unit.strip())
+            current = []
+            current_len = 0
+            continue
+
+        current.append(unit)
+        current_len += separator_len + len(unit)
+
+    if current:
+        chunks.append("\n\n".join(current).strip())
+
+    return [chunk for chunk in chunks if chunk]
+
+
+def _compact_chunks(
+    chunks: list[str],
+    min_chunk_size: int = MIN_CHUNK_MERGE_SIZE,
+    max_merged_size: int = MAX_MERGED_CHUNK_SIZE,
+) -> list[str]:
+    if not chunks:
+        return []
+
+    compacted: list[str] = []
+    for chunk in chunks:
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+
+        if not compacted:
+            compacted.append(chunk)
+            continue
+
+        if len(chunk) < min_chunk_size:
+            merged = f"{compacted[-1]}\n\n{chunk}".strip()
+            if len(merged) <= max_merged_size:
+                compacted[-1] = merged
+                continue
+
+        compacted.append(chunk)
+
+    if len(compacted) >= 2 and len(compacted[-1]) < min_chunk_size:
+        merged_tail = f"{compacted[-2]}\n\n{compacted[-1]}".strip()
+        if len(merged_tail) <= max_merged_size:
+            compacted[-2] = merged_tail
+            compacted.pop()
+
+    return compacted
+
+
+def _looks_like_useful_pdf_text(text: str) -> bool:
+    normalized = _normalize_document_text(text)
+    if len(normalized) < PDF_DIRECT_TEXT_MIN_CHARS:
+        return False
+
+    alnum_ratio = sum(ch.isalnum() for ch in normalized) / max(len(normalized), 1)
+    alpha_tokens = sum(1 for token in normalized.split() if any(ch.isalpha() for ch in token))
+    return alnum_ratio >= 0.35 and alpha_tokens >= 50
 
 def _extract_pdf_text_mistral(raw_bytes: bytes) -> str:
     """Extract text from PDF using Mistral OCR API, falls back to pypdf."""
@@ -83,6 +292,95 @@ def _extract_pdf_text_pypdf(raw_bytes: bytes) -> str:
         return raw_bytes.decode("utf-8", errors="ignore")
 
 
+def _extract_pdf_text(raw_bytes: bytes) -> str:
+    if PDF_OCR_MODE == "never":
+        return _normalize_document_text(_extract_pdf_text_pypdf(raw_bytes))
+    if PDF_OCR_MODE == "always":
+        return _normalize_document_text(_extract_pdf_text_mistral(raw_bytes))
+
+    direct_text = _extract_pdf_text_pypdf(raw_bytes)
+    if _looks_like_useful_pdf_text(direct_text):
+        logger.info("[ingest] Using fast pypdf extraction for text-based PDF")
+        return _normalize_document_text(direct_text)
+
+    if os.environ.get("MISTRAL_API_KEY", "").strip():
+        logger.info("[ingest] Falling back to Mistral OCR for scanned or low-text PDF")
+        return _normalize_document_text(_extract_pdf_text_mistral(raw_bytes))
+
+    logger.info("[ingest] OCR unavailable; using best-effort pypdf extraction")
+    return _normalize_document_text(direct_text)
+
+
+def _filter_supported_kwargs(callable_obj: Any, kwargs: dict[str, Any]) -> dict[str, Any]:
+    try:
+        signature = inspect.signature(callable_obj)
+    except (TypeError, ValueError):
+        return kwargs
+
+    if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in signature.parameters.values()):
+        return kwargs
+
+    return {key: value for key, value in kwargs.items() if key in signature.parameters}
+
+
+def _copy_with_updates(model: Any, updates: dict[str, Any]) -> Any:
+    if model is None:
+        return None
+    if hasattr(model, "model_copy"):
+        return model.model_copy(update=updates)
+    if hasattr(model, "copy"):
+        return model.copy(update=updates)
+
+    for key, value in updates.items():
+        try:
+            setattr(model, key, value)
+        except Exception:
+            pass
+    return model
+
+
+def _extract_episode_uuid(result: Any) -> Optional[str]:
+    if result is None:
+        return None
+    if isinstance(result, dict):
+        episode = result.get("episode")
+        if isinstance(episode, dict):
+            return episode.get("uuid")
+        return getattr(episode, "uuid", None) or result.get("uuid")
+
+    episode = getattr(result, "episode", None)
+    if episode is not None:
+        return getattr(episode, "uuid", None)
+    return getattr(result, "uuid", None)
+
+
+def _truncate(text: str, limit: int = 280) -> str:
+    cleaned = " ".join(str(text).split()).strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[: limit - 3].rstrip() + "..."
+
+
+def _dedupe_strings(values: list[str], limit: int) -> list[str]:
+    if limit <= 0:
+        return []
+
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for value in values:
+        cleaned = " ".join(value.split()).strip()
+        if not cleaned:
+            continue
+        key = cleaned.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        deduped.append(cleaned)
+        if len(deduped) >= limit:
+            break
+    return deduped
+
+
 class GraphitiRAGService:
     """
     Graph-based RAG using Graphiti + FalkorDB.
@@ -91,6 +389,8 @@ class GraphitiRAGService:
     def __init__(self) -> None:
         self.graphiti = None
         self._init_lock: Optional[asyncio.Lock] = None
+        self._episode_type_text = None
+        self._search_recipe = None
 
     def _get_lock(self) -> asyncio.Lock:
         if self._init_lock is None:
@@ -106,8 +406,9 @@ class GraphitiRAGService:
             if self.graphiti is not None:
                 return
 
+            os.environ.setdefault("SEMAPHORE_LIMIT", str(GRAPHITI_MAX_COROUTINES))
+
             from graphiti_core import Graphiti
-            from graphiti_core.nodes import EpisodicNode, EntityNode
             from graphiti_core.driver.falkordb_driver import FalkorDriver
             from app.llm.llm_client import get_graphiti_llm_client, get_graphiti_embedder
 
@@ -120,26 +421,205 @@ class GraphitiRAGService:
                 port=port, 
                 database="graphiti"
             )
-            self.graphiti = Graphiti(
-                graph_driver=driver,
-                llm_client=get_graphiti_llm_client(),
-                embedder=get_graphiti_embedder(),
+            graphiti_kwargs = {
+                "graph_driver": driver,
+                "llm_client": get_graphiti_llm_client(),
+                "embedder": get_graphiti_embedder(),
+                "max_coroutines": GRAPHITI_MAX_COROUTINES,
+            }
+            self.graphiti = Graphiti(**_filter_supported_kwargs(Graphiti, graphiti_kwargs))
+
+            try:
+                from graphiti_core.nodes import EpisodeType
+
+                self._episode_type_text = EpisodeType.text
+            except Exception:
+                self._episode_type_text = None
+
+            if GRAPHITI_USE_ADVANCED_SEARCH:
+                try:
+                    from graphiti_core.search.search_config_recipes import (
+                        COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
+                    )
+
+                    self._search_recipe = COMBINED_HYBRID_SEARCH_CROSS_ENCODER
+                except Exception as exc:
+                    logger.info(f"[rag] Advanced Graphiti search recipe unavailable: {exc}")
+
+            if GRAPHITI_BUILD_INDICES:
+                build_indices = getattr(self.graphiti, "build_indices_and_constraints", None)
+                if callable(build_indices):
+                    start = time.perf_counter()
+                    try:
+                        await build_indices()
+                        logger.info(
+                            f"[rag] Graphiti indices ensured in {time.perf_counter() - start:.2f}s"
+                        )
+                    except Exception as exc:
+                        logger.warning(f"[rag] Failed to ensure Graphiti indices: {exc}")
+
+            logger.info(
+                "[rag] Graphiti initialized ✓ "
+                f"(max_coroutines={GRAPHITI_MAX_COROUTINES}, "
+                f"ingest_concurrency={INGEST_CONCURRENCY}, "
+                f"chunk_size={CHUNK_SIZE}, overlap={CHUNK_OVERLAP})"
             )
-            logger.info("[rag] Graphiti initialized ✓")
 
     async def initialize(self) -> None:
         await self._ensure_initialized()
 
-    async def insert_document(self, doc_id: str, text: str, filename: str = "", group_id: str = "default") -> None:
-        await self._ensure_initialized()
-        if self.graphiti:
-            await self.graphiti.add_episode(
-                name=filename or doc_id,
-                episode_body=text,
-                source_description="Financial Document",
-                reference_time=datetime.now(),
-                group_id=group_id,
+    def _build_search_kwargs(
+        self,
+        question: str,
+        limit: int,
+        group_ids: Optional[List[str]],
+    ) -> dict[str, Any]:
+        search_kwargs: dict[str, Any] = {
+            "query": question,
+            "group_ids": group_ids,
+        }
+
+        try:
+            search_signature = inspect.signature(self.graphiti.search)
+            search_params = search_signature.parameters
+        except (TypeError, ValueError, AttributeError):
+            search_params = {}
+
+        if "num_results" in search_params:
+            search_kwargs["num_results"] = limit
+
+        if self._search_recipe is not None:
+            search_config = _copy_with_updates(self._search_recipe, {"limit": limit})
+            if "config" in search_params:
+                search_kwargs["config"] = search_config
+            elif "search_config" in search_params:
+                search_kwargs["search_config"] = search_config
+
+        return search_kwargs
+
+    def _normalize_search_results(self, search_results: Any) -> tuple[list[Any], list[Any], list[Any], list[Any]]:
+        if search_results is None:
+            return [], [], [], []
+
+        if (
+            hasattr(search_results, "edges")
+            or hasattr(search_results, "nodes")
+            or hasattr(search_results, "episodes")
+            or hasattr(search_results, "communities")
+        ):
+            return (
+                list(getattr(search_results, "edges", []) or []),
+                list(getattr(search_results, "nodes", []) or []),
+                list(getattr(search_results, "episodes", []) or []),
+                list(getattr(search_results, "communities", []) or []),
             )
+
+        if isinstance(search_results, list):
+            return search_results, [], [], []
+
+        try:
+            coerced = list(search_results)
+        except TypeError:
+            coerced = [search_results]
+        return coerced, [], [], []
+
+    def _format_search_context(
+        self,
+        edges: list[Any],
+        nodes: list[Any],
+        episodes: list[Any],
+        communities: list[Any],
+    ) -> str:
+        facts = _dedupe_strings(
+            [getattr(edge, "fact", "") for edge in edges if getattr(edge, "fact", "")],
+            GRAPHITI_FACT_LIMIT,
+        )
+
+        node_lines = _dedupe_strings(
+            [
+                (
+                    f"{getattr(node, 'name', 'Entity')}: "
+                    f"{_truncate(getattr(node, 'summary', '') or '', 220)}"
+                ).rstrip(": ")
+                for node in nodes
+            ],
+            GRAPHITI_NODE_LIMIT,
+        )
+
+        episode_lines = _dedupe_strings(
+            [
+                (
+                    f"{getattr(episode, 'name', 'Episode')}: "
+                    f"{_truncate(getattr(episode, 'content', '') or getattr(episode, 'source_description', ''), 220)}"
+                ).rstrip(": ")
+                for episode in episodes
+            ],
+            GRAPHITI_EPISODE_LIMIT,
+        )
+
+        community_lines = _dedupe_strings(
+            [
+                (
+                    f"{getattr(community, 'name', 'Community')}: "
+                    f"{_truncate(getattr(community, 'summary', '') or '', 220)}"
+                ).rstrip(": ")
+                for community in communities
+            ],
+            GRAPHITI_COMMUNITY_LIMIT,
+        )
+
+        lines: list[str] = []
+        if facts:
+            lines.append("Facts:")
+            lines.extend(f"- {fact}" for fact in facts)
+        if node_lines:
+            lines.append("Entities:")
+            lines.extend(f"- {line}" for line in node_lines)
+        if episode_lines:
+            lines.append("Episodes:")
+            lines.extend(f"- {line}" for line in episode_lines)
+        if community_lines:
+            lines.append("Communities:")
+            lines.extend(f"- {line}" for line in community_lines)
+        return "\n".join(lines)
+
+    async def insert_document(
+        self,
+        doc_id: str,
+        text: str,
+        filename: str = "",
+        group_id: str = "default",
+        previous_episode_uuid: Optional[str] = None,
+    ) -> Optional[str]:
+        await self._ensure_initialized()
+        if not self.graphiti:
+            return None
+
+        add_episode_kwargs: dict[str, Any] = {
+            "name": filename or doc_id,
+            "episode_body": text,
+            "source_description": filename or doc_id,
+            "reference_time": datetime.now(timezone.utc),
+            "group_id": group_id,
+            "excluded_entity_types": [],
+        }
+        if self._episode_type_text is not None:
+            add_episode_kwargs["source"] = self._episode_type_text
+        if GRAPHITI_EXTRACTION_INSTRUCTIONS:
+            add_episode_kwargs["custom_extraction_instructions"] = GRAPHITI_EXTRACTION_INSTRUCTIONS
+        if GRAPHITI_ENABLE_SAGA:
+            add_episode_kwargs["saga"] = group_id
+            if previous_episode_uuid:
+                add_episode_kwargs["saga_previous_episode_uuid"] = previous_episode_uuid
+
+        start = time.perf_counter()
+        result = await self.graphiti.add_episode(
+            **_filter_supported_kwargs(self.graphiti.add_episode, add_episode_kwargs)
+        )
+        logger.info(
+            f"[rag] add_episode completed in {time.perf_counter() - start:.2f}s for {filename or doc_id}"
+        )
+        return _extract_episode_uuid(result)
 
     async def query(self, question: str, mode: str = "graph", group_ids: Optional[List[str]] = None) -> str:
         await self._ensure_initialized()
@@ -150,27 +630,35 @@ class GraphitiRAGService:
         if group_ids is not None and len(group_ids) == 0:
             logger.info(f"[rag] No chat-doc mapping found, searching across all documents")
 
-        limit = 5 if mode == "graph" else 10
+        limit = GRAPHITI_GRAPH_SEARCH_LIMIT if mode == "graph" else GRAPHITI_HYBRID_SEARCH_LIMIT
         try:
+            start = time.perf_counter()
             search_results = await self.graphiti.search(
-                query=question, 
-                num_results=limit,
-                group_ids=effective_group_ids
+                **self._build_search_kwargs(question, limit, effective_group_ids)
             )
+            elapsed_ms = (time.perf_counter() - start) * 1000
         except Exception as e:
             logger.error(f"Graphiti search failed for question '{question}': {e}", exc_info=True)
             return f"[Search failed due to technical error: {str(e)}]"
 
-        if not search_results:
+        edges, nodes, episodes, communities = self._normalize_search_results(search_results)
+        total_results = len(edges) + len(nodes) + len(episodes) + len(communities)
+        if total_results == 0:
             logger.warning(f"[rag] No relevant context found in Graphiti for query: {question} (groups: {effective_group_ids})")
             return "[No relevant context found]"
 
-        logger.info(f"[rag] Found {len(search_results)} search results for: {question}")
-        facts = [edge.fact for edge in search_results if edge.fact]
-        if not facts:
-            logger.warning(f"[rag] Search returned {len(search_results)} edges but none had facts")
+        logger.info(
+            "[rag] Search returned "
+            f"edges={len(edges)}, nodes={len(nodes)}, episodes={len(episodes)}, "
+            f"communities={len(communities)} in {elapsed_ms:.1f}ms for: {question}"
+        )
+        context = self._format_search_context(edges, nodes, episodes, communities)
+        if not context:
+            logger.warning(
+                f"[rag] Search returned {total_results} graph items but no usable context for: {question}"
+            )
             return "[No relevant context found]"
-        return "\n".join(f"- {fact}" for fact in facts)
+        return context
 
     async def finalize(self) -> None:
         pass
@@ -278,59 +766,90 @@ async def _ingest_async(doc_id: str, raw_bytes: bytes, filename: str) -> None:
     """
     logger.info(f"[ingest] - Starting: {filename} ({doc_id})")
     _mark_status(doc_id, "processing")
+    started_at = time.perf_counter()
+    rag_task: asyncio.Task[GraphitiRAGService] = asyncio.create_task(_get_rag_service())
 
     try:
         if filename.lower().endswith(".pdf"):
-            logger.info(f"[ingest] Extracting PDF text via Mistral OCR: {filename}")
+            logger.info(f"[ingest] Extracting PDF text: {filename}")
             loop = asyncio.get_running_loop()
-            text = await loop.run_in_executor(None, _extract_pdf_text_mistral, raw_bytes)
+            text = await loop.run_in_executor(None, _extract_pdf_text, raw_bytes)
         else:
-            text = raw_bytes.decode("utf-8", errors="ignore")
+            text = _normalize_document_text(raw_bytes.decode("utf-8", errors="ignore"))
 
         if not text.strip():
             logger.warning(f"[ingest] No text extracted from {filename} — marking failed")
             _mark_status(doc_id, "failed")
+            if not rag_task.done():
+                rag_task.cancel()
             return
 
         chunks = _chunk_text(text)
-        logger.info(f"[ingest] {len(chunks)} chunks to ingest for {filename}")
+        chunk_count_before_compaction = len(chunks)
+        chunks = _compact_chunks(chunks)
+        avg_chunk_size = sum(len(chunk) for chunk in chunks) // max(len(chunks), 1)
+        logger.info(
+            f"[ingest] {len(chunks)} chunks to ingest for {filename} "
+            f"(avg_chars={avg_chunk_size}, chunk_concurrency={INGEST_CONCURRENCY}, "
+            f"compacted_from={chunk_count_before_compaction})"
+        )
 
-        rag = await _get_rag_service()
-        semaphore = asyncio.Semaphore(INGEST_CONCURRENCY)
+        rag = await rag_task
         success_count = 0
         fail_count = 0
+        previous_episode_uuid: Optional[str] = None
 
-        async def _ingest_one(i: int, chunk: str) -> None:
+        async def _ingest_one(i: int, chunk: str, chain_previous_uuid: Optional[str] = None) -> Optional[str]:
             nonlocal success_count, fail_count
-            async with semaphore:
-                chunk_id    = f"{doc_id}_{i}"
-                chunk_label = f"{filename} (part {i + 1}/{len(chunks)})"
-                try:
-                    logger.debug(f"[ingest] - chunk {i + 1}/{len(chunks)}")
-                    await rag.insert_document(
-                        doc_id=chunk_id,
-                        text=chunk,
-                        filename=chunk_label,
-                        group_id=doc_id, 
-                    )
-                    success_count += 1
-                except Exception as e:
-                    fail_count += 1
-                    logger.warning(f"[ingest] - chunk {i + 1} failed (continuing): {e}")
+            chunk_id = f"{doc_id}_{i}"
+            chunk_label = f"{filename} (part {i + 1}/{len(chunks)})"
+            try:
+                logger.debug(f"[ingest] - chunk {i + 1}/{len(chunks)}")
+                episode_uuid = await rag.insert_document(
+                    doc_id=chunk_id,
+                    text=chunk,
+                    filename=chunk_label,
+                    group_id=doc_id,
+                    previous_episode_uuid=chain_previous_uuid,
+                )
+                success_count += 1
+                return episode_uuid
+            except Exception as e:
+                fail_count += 1
+                logger.warning(f"[ingest] - chunk {i + 1} failed (continuing): {e}")
+                return None
 
-        await asyncio.gather(*[
-            _ingest_one(i, chunk)
-            for i, chunk in enumerate(chunks)
-            if chunk.strip()
-        ])
+        non_empty_chunks = [(i, chunk) for i, chunk in enumerate(chunks) if chunk.strip()]
+
+        if INGEST_CONCURRENCY == 1:
+            for i, chunk in non_empty_chunks:
+                previous_episode_uuid = await _ingest_one(i, chunk, previous_episode_uuid)
+        else:
+            logger.warning(
+                "[ingest] Parallel chunk ingestion is enabled. This can increase throughput, "
+                "but may reduce entity resolution quality versus sequential Graphiti ingestion."
+            )
+            semaphore = asyncio.Semaphore(INGEST_CONCURRENCY)
+
+            async def _guarded_ingest(i: int, chunk: str) -> None:
+                async with semaphore:
+                    await _ingest_one(i, chunk)
+
+            await asyncio.gather(*[
+                _guarded_ingest(i, chunk)
+                for i, chunk in non_empty_chunks
+            ])
 
         logger.info(
             f"[ingest] - Done: {filename} — "
-            f"{success_count} ok, {fail_count} failed out of {len(chunks)} chunks"
+            f"{success_count} ok, {fail_count} failed out of {len(chunks)} chunks "
+            f"in {time.perf_counter() - started_at:.2f}s"
         )
         _mark_status(doc_id, "completed" if fail_count < len(chunks) else "failed")
 
     except Exception as e:
+        if not rag_task.done():
+            rag_task.cancel()
         logger.error(f"[ingest] - Fatal error for {filename}: {e}", exc_info=True)
         _mark_status(doc_id, "failed")
 

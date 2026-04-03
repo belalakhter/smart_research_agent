@@ -3,11 +3,8 @@
 - Highly Fast Document Ingestion
 - Research optimized intelligent Answer
 - Formatted structured Response
-- Graph knowledge based RAG
+- Cost effecting utilizing only GPT 4o
+- Media attachment support 
 
-## Tech Stack
+## Demo
 
--  Flask WSGI
-- Falkor DB and Graphiti
-- LangGraph based agent state
-- Mistral OCR and OPEN AI LLM

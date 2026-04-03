@@ -53,15 +53,35 @@ def web_search(query: str, max_results: int = 5) -> str:
     return "\n".join(parts) if parts else "[No results found]"
 
 
-def should_search_web(user_message: str) -> bool:
+def should_search_web(user_message: str, has_documents: bool = False) -> bool:
     """
-    Simple heuristic: trigger web search for questions that look like
-    they need current/external information.
+    Conservative heuristic: only trigger web search when the question
+    clearly needs current/external information. If documents are already
+    available, prefer them unless the user asks for current/live data.
     """
-    triggers = [
-        "search", "latest", "current", "today", "news", "price",
-        "weather", "who is", "what is", "when did", "where is",
-        "how to", "find", "look up", "tell me about",
-    ]
     msg_lower = user_message.lower()
-    return any(t in msg_lower for t in triggers)
+
+    current_info_triggers = [
+        "latest", "current", "today", "news", "recent", "live",
+        "price", "stock price", "market price", "weather", "this week",
+        "this month", "this year", "as of now", "currently",
+    ]
+    explicit_web_triggers = [
+        "search the web", "search online", "look up online", "browse",
+        "internet", "on the web",
+    ]
+
+    if any(t in msg_lower for t in explicit_web_triggers):
+        return True
+
+    if any(t in msg_lower for t in current_info_triggers):
+        return True
+
+    if has_documents:
+        return False
+
+    general_external_triggers = [
+        "who is", "what is", "when did", "where is", "how to",
+        "find", "look up",
+    ]
+    return any(t in msg_lower for t in general_external_triggers)
