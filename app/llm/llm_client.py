@@ -10,6 +10,8 @@ _client = OpenAI(
 )
 
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o")
+GRAPHITI_SMALL_MODEL = os.environ.get("GRAPHITI_SMALL_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+GRAPHITI_MODEL = os.environ.get("GRAPHITI_MODEL", GRAPHITI_SMALL_MODEL).strip() or GRAPHITI_SMALL_MODEL
 
 
 def chat_completion(
@@ -41,11 +43,12 @@ def chat_completion(
 
 
 def get_graphiti_llm_client() -> OpenAIClient:
-    """Return a Graphiti-compatible OpenAI LLM client."""
+    """Return a Graphiti-compatible OpenAI LLM client.
+    """
     config = LLMConfig(
         api_key=os.environ.get("OPENAI_API_KEY", ""),
-        model=LLM_MODEL,
-        small_model="gpt-4o-mini"
+        model=GRAPHITI_MODEL,
+        small_model=GRAPHITI_SMALL_MODEL,
     )
     return OpenAIClient(config=config)
 

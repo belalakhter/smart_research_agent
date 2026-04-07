@@ -571,6 +571,11 @@ body {
   margin-bottom: 12px;
 }
 
+.msg-row.user + .msg-row.assistant,
+.msg-row.user + .thinking-row {
+  margin-top: 10px;
+}
+
 .msg-row.user .msg-avatar {
   display: none;
 }

@@ -347,31 +347,43 @@ def node_router(state: AgentState) -> AgentState:
 
     return state
 
-
 def node_rag_semantic(state: AgentState) -> AgentState:
     """Strategy A: Semantic RAG using full history context."""
     if state.strategy != "A" or not state.search_query:
         return state
 
-    state.rag_context = _sync_rag_query(
-        state.search_query, 
-        mode="hybrid", 
-        doc_ids=state.available_doc_ids
+    hybrid_ctx = _sync_rag_query(
+        state.search_query, mode="hybrid", doc_ids=state.available_doc_ids
     )
-    return state
+    graph_ctx = _sync_rag_query(
+        state.search_query, mode="graph", doc_ids=state.available_doc_ids
+    )
 
+    contexts = [c for c in [hybrid_ctx, graph_ctx] if c and "[No relevant" not in c]
+    state.rag_context = "\n\n".join(contexts) if contexts else ""
+    return state
 
 def node_rag_graph(state: AgentState) -> AgentState:
     """Strategy B: Pure Graph context without history dependence."""
     if state.strategy != "B" or not state.search_query:
         return state
-    state.rag_context = _sync_rag_query(
-        state.search_query, 
-        mode="graph", 
-        doc_ids=state.available_doc_ids
-    )
-    return state
 
+    queries = [state.search_query]
+    
+    if state.analysis_focus and len(state.analysis_focus) > 1:
+        for focus in state.analysis_focus[:3]:
+            focused_q = f"{focus}: {state.last_user_message}"
+            if focused_q not in queries:
+                queries.append(focused_q)
+
+    contexts = []
+    for q in queries:
+        ctx = _sync_rag_query(q, mode="graph", doc_ids=state.available_doc_ids)
+        if ctx and "[No relevant" not in ctx:
+            contexts.append(ctx)
+
+    state.rag_context = "\n\n".join(contexts) if contexts else ""
+    return state
 
 def _sync_rag_query(query: str, mode: str, doc_ids: list[str] = None) -> str:
     try:
@@ -383,6 +395,7 @@ def _sync_rag_query(query: str, mode: str, doc_ids: list[str] = None) -> str:
             return await rag.query(query, mode=mode, group_ids=doc_ids)
 
         context = submit_async(_do_query(), wait=True, timeout=30)
+        logger.info(f"[rag] Query='{query}' mode={mode} doc_ids={doc_ids} → {len(context or '')} chars returned")
         if context and "[No relevant" not in context:
             return RAG_CONTEXT_TEMPLATE.format(context=context)
     except Exception as e:

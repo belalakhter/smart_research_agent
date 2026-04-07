@@ -9,8 +9,15 @@ services:
       - ./falkordb.conf:/etc/falkordb/falkordb.conf:ro
     environment:
       - REDIS_ARGS=/etc/falkordb/falkordb.conf
-      - FALKORDB_ARGS=THREAD_COUNT 4 MAX_QUEUED_QUERIES 500 NODE_CREATION_BUFFER 16384
+      - FALKORDB_ARGS=THREAD_COUNT 4 MAX_QUEUED_QUERIES 500 NODE_CREATION_BUFFER 65536 RESULTSET_SIZE 10000 CACHE_SIZE 128
     command: [ "redis-server", "/etc/falkordb/falkordb.conf" ]
+    restart: unless-stopped
+    healthcheck:
+      test: [ "CMD", "redis-cli", "-p", "6379", "ping" ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
 
   falkordb-browser:
     image: falkordb/falkordb-browser:latest
@@ -33,7 +40,8 @@ services:
     volumes:
       - ./:/app
     depends_on:
-      - falkordb
+      falkordb:
+        condition: service_healthy
 
 volumes:
   falkordb_data:
