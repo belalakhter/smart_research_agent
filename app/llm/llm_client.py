@@ -1,5 +1,5 @@
 import os
-from typing import Optional
+from typing import Any, Optional
 from openai import OpenAI
 from graphiti_core.llm_client.openai_client import OpenAIClient
 from graphiti_core.llm_client.config import LLMConfig
@@ -12,6 +12,29 @@ _client = OpenAI(
 LLM_MODEL = os.environ.get("LLM_MODEL", "gpt-4o")
 GRAPHITI_SMALL_MODEL = os.environ.get("GRAPHITI_SMALL_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
 GRAPHITI_MODEL = os.environ.get("GRAPHITI_MODEL", GRAPHITI_SMALL_MODEL).strip() or GRAPHITI_SMALL_MODEL
+
+
+def _format_message_content(message: dict) -> Any:
+    content = message.get("content", "")
+    media = message.get("media") or []
+    if message.get("role") != "user" or not media:
+        return content
+
+    parts: list[dict[str, Any]] = []
+    if content:
+        parts.append({"type": "text", "text": content})
+
+    for item in media:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type", "")).strip().lower() != "image":
+            continue
+        data_url = str(item.get("data_url", "")).strip()
+        if not data_url:
+            continue
+        parts.append({"type": "image_url", "image_url": {"url": data_url}})
+
+    return parts or content
 
 
 def chat_completion(
@@ -30,7 +53,7 @@ def chat_completion(
         formatted.append({"role": "system", "content": system_prompt})
 
     for m in messages:
-        formatted.append({"role": m["role"], "content": m["content"]})
+        formatted.append({"role": m["role"], "content": _format_message_content(m)})
 
     response = _client.chat.completions.create(
         model=LLM_MODEL,
@@ -43,8 +66,7 @@ def chat_completion(
 
 
 def get_graphiti_llm_client() -> OpenAIClient:
-    """Return a Graphiti-compatible OpenAI LLM client.
-    """
+    """Return a Graphiti-compatible OpenAI LLM client."""
     config = LLMConfig(
         api_key=os.environ.get("OPENAI_API_KEY", ""),
         model=GRAPHITI_MODEL,

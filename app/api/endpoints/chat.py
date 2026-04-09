@@ -1,4 +1,6 @@
 from flask import Blueprint, request, jsonify
+import base64
+import binascii
 import uuid
 import threading
 
@@ -12,6 +14,44 @@ from app.database.connection import get_redis
 chat_bp = Blueprint("chat", __name__)
 
 METADATA_KEY = "smart_agent:chat_metadata"
+MAX_INLINE_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+def _normalize_media_payload(raw_media):
+    if not isinstance(raw_media, dict):
+        return None
+
+    media_type = str(raw_media.get("type", "image")).strip().lower()
+    name = str(raw_media.get("name", "")).strip() or "image"
+    mime_type = str(raw_media.get("mime_type", "")).strip().lower()
+    data_url = str(raw_media.get("data_url", "")).strip()
+
+    if media_type != "image" or not data_url.startswith("data:image/"):
+        return None
+
+    header, _, encoded = data_url.partition(",")
+    if not header or not encoded or ";base64" not in header:
+        return None
+
+    header_mime = header[5:].split(";", 1)[0].strip().lower()
+    mime_type = mime_type or header_mime
+    if not mime_type.startswith("image/") or header_mime != mime_type:
+        return None
+
+    try:
+        binary = base64.b64decode(encoded, validate=True)
+    except (ValueError, binascii.Error):
+        return None
+
+    if len(binary) > MAX_INLINE_IMAGE_BYTES:
+        return None
+
+    return {
+        "type": "image",
+        "name": name,
+        "mime_type": mime_type,
+        "data_url": data_url,
+    }
 
 @chat_bp.route("/chats", methods=["POST"])
 def create_chat():
@@ -214,8 +254,13 @@ def send_message(chat_id):
     """
     data = request.get_json(silent=True) or {}
     message = data.get("message", "").strip()
+    media = None
     if not message:
         return jsonify({"error": "message is required"}), 400
+    if data.get("media") is not None:
+        media = _normalize_media_payload(data.get("media"))
+        if media is None:
+            return jsonify({"error": "invalid image attachment"}), 400
 
     try:
         r = get_redis()
@@ -226,10 +271,16 @@ def send_message(chat_id):
 
     chat_store.push(chat_id, {"role": "user", "content": message})
     messages = chat_store.get(chat_id)
+    messages_for_agent = messages
+    if media and messages:
+        messages_for_agent = [
+            *messages[:-1],
+            {**messages[-1], "media": [media]},
+        ]
 
     try:
         from app.agent.graph import run_agent
-        reply = run_agent(chat_id=chat_id, messages=messages)
+        reply = run_agent(chat_id=chat_id, messages=messages_for_agent)
     except Exception as e:
         reply = f"[Agent error] {e}"
 

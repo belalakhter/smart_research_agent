@@ -144,6 +144,22 @@ def _normalize_document_text(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _load_searchable_document_ids() -> list[str]:
+    try:
+        from app.database.document_store import list_documents
+
+        ready_statuses = {"completed", "done", "ready"}
+        return [
+            str(doc.get("id", "")).strip()
+            for doc in list_documents()
+            if str(doc.get("status", "")).strip().lower() in ready_statuses
+            and str(doc.get("id", "")).strip()
+        ]
+    except Exception as exc:
+        logger.warning(f"[rag] Failed to load searchable document ids: {exc}")
+        return []
+
+
 def _split_large_unit(unit: str, chunk_size: int) -> list[str]:
     unit = unit.strip()
     if not unit:
@@ -701,6 +717,7 @@ class GraphitiRAGService:
         self._init_lock: Optional[asyncio.Lock] = None
         self._episode_type_text = None
         self._search_recipe = None
+        self._graph_search_recipe = None
 
     def _get_lock(self) -> asyncio.Lock:
         if self._init_lock is None:
@@ -752,9 +769,11 @@ class GraphitiRAGService:
                 try:
                     from graphiti_core.search.search_config_recipes import (
                         COMBINED_HYBRID_SEARCH_CROSS_ENCODER,
+                        EDGE_HYBRID_SEARCH_CROSS_ENCODER,
                     )
 
                     self._search_recipe = COMBINED_HYBRID_SEARCH_CROSS_ENCODER
+                    self._graph_search_recipe = EDGE_HYBRID_SEARCH_CROSS_ENCODER
                 except Exception as exc:
                     logger.info(f"[rag] Advanced Graphiti search recipe unavailable: {exc}")
 
@@ -786,6 +805,26 @@ class GraphitiRAGService:
     async def initialize(self) -> None:
         await self._ensure_initialized()
 
+    def _resolve_search_driver(self, group_ids: Optional[List[str]]):
+        if not group_ids or len(group_ids) != 1 or not self.graphiti:
+            return None
+
+        driver = getattr(self.graphiti, "driver", None)
+        group_id = group_ids[0]
+        current_db = getattr(driver, "_database", None) if driver is not None else None
+        clone = getattr(driver, "clone", None) if driver is not None else None
+
+        if not callable(clone) or not group_id or group_id == current_db:
+            return None
+
+        try:
+            cloned_driver = clone(database=group_id)
+            logger.info(f"[rag] Using per-doc Falkor graph '{group_id}' for search")
+            return cloned_driver
+        except Exception as exc:
+            logger.warning(f"[rag] Failed to clone Falkor driver for group '{group_id}': {exc}")
+            return None
+
     def _build_search_kwargs(
         self,
         question: str,
@@ -812,6 +851,28 @@ class GraphitiRAGService:
                 search_kwargs["config"] = search_config
             elif "search_config" in search_params:
                 search_kwargs["search_config"] = search_config
+
+        return search_kwargs
+
+    def _build_advanced_search_kwargs(
+        self,
+        question: str,
+        limit: int,
+        group_ids: Optional[List[str]],
+        mode: str,
+        driver: Any = None,
+    ) -> dict[str, Any]:
+        search_kwargs: dict[str, Any] = {
+            "query": question,
+            "group_ids": group_ids,
+        }
+
+        if driver is not None:
+            search_kwargs["driver"] = driver
+
+        recipe = self._graph_search_recipe if mode == "graph" else self._search_recipe
+        if recipe is not None:
+            search_kwargs["config"] = _copy_with_updates(recipe, {"limit": limit})
 
         return search_kwargs
 
@@ -1013,14 +1074,44 @@ class GraphitiRAGService:
 
         effective_group_ids = group_ids if group_ids else None
         if group_ids is not None and len(group_ids) == 0:
-            logger.info(f"[rag] No chat-doc mapping found, searching across all documents")
+            fallback_group_ids = _load_searchable_document_ids()
+            if fallback_group_ids:
+                effective_group_ids = fallback_group_ids
+                logger.info(
+                    f"[rag] No chat-doc mapping found, searching across "
+                    f"{len(fallback_group_ids)} completed documents"
+                )
+            else:
+                logger.info("[rag] No chat-doc mapping found and no completed documents are available")
+        elif group_ids is None:
+            fallback_group_ids = _load_searchable_document_ids()
+            if fallback_group_ids:
+                effective_group_ids = fallback_group_ids
+                logger.info(
+                    f"[rag] No explicit doc filter provided, searching across "
+                    f"{len(fallback_group_ids)} completed documents"
+                )
 
         limit = GRAPHITI_GRAPH_SEARCH_LIMIT if mode == "graph" else GRAPHITI_HYBRID_SEARCH_LIMIT
+        search_driver = self._resolve_search_driver(effective_group_ids)
         try:
             start = time.perf_counter()
-            search_results = await self.graphiti.search(
-                **self._build_search_kwargs(question, limit, effective_group_ids)
-            )
+            advanced_search = getattr(self.graphiti, "search_", None)
+            if callable(advanced_search):
+                search_results = await advanced_search(
+                    **self._build_advanced_search_kwargs(
+                        question,
+                        limit,
+                        effective_group_ids,
+                        mode,
+                        driver=search_driver,
+                    )
+                )
+            else:
+                search_kwargs = self._build_search_kwargs(question, limit, effective_group_ids)
+                if search_driver is not None:
+                    search_kwargs["driver"] = search_driver
+                search_results = await self.graphiti.search(**search_kwargs)
             elapsed_ms = (time.perf_counter() - start) * 1000
         except Exception as e:
             logger.error(f"Graphiti search failed for question '{question}': {e}", exc_info=True)

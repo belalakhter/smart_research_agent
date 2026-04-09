@@ -94,12 +94,31 @@
 
     <div id="input-area">
       <div class="input-wrap">
-        <textarea id="msg-input" placeholder="Ask anything…" rows="1"></textarea>
-        <button id="send-btn" disabled>
-          <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
-            <path d="M7.5 2L7.5 13M3 6.5L7.5 2L12 6.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
-        </button>
+        <input type="file" id="image-input" accept="image/*" />
+        <div class="composer-main">
+          <div id="image-attachment-chip" class="attachment-chip" hidden>
+            <div class="attachment-chip-preview" aria-hidden="true"></div>
+            <button id="clear-image-btn" type="button" aria-label="Remove image attachment" title="Remove image">
+              <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true">
+                <path d="M3 3l6 6M9 3L3 9" stroke="currentColor" stroke-width="1.4" stroke-linecap="round"/>
+              </svg>
+            </button>
+          </div>
+          <div class="composer-row">
+            <button id="attach-image-btn" type="button" aria-label="Attach image" title="Attach image">
+              <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <path d="M5.5 8.5l4.6-4.6a2.75 2.75 0 113.9 3.9l-6.18 6.18a4 4 0 11-5.66-5.66l5.66-5.66"
+                  stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+            <textarea id="msg-input" placeholder="Ask anything…" rows="1"></textarea>
+            <button id="send-btn" disabled>
+              <svg width="15" height="15" viewBox="0 0 15 15" fill="none">
+                <path d="M7.5 2L7.5 13M3 6.5L7.5 2L12 6.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
+          </div>
+        </div>
       </div>
     </div>
   </main>

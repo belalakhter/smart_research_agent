@@ -1,6 +1,7 @@
 import logging
 import json
 import os
+import re
 
 from app.agent.state import AgentState
 from app.agent.memory import trim_messages, last_user_message
@@ -17,6 +18,37 @@ from app.llm.prompts import (
 
 logger = logging.getLogger(__name__)
 FINAL_RESPONSE_MAX_TOKENS = int(os.environ.get("AGENT_MAX_RESPONSE_TOKENS", "2800"))
+QUERY_SPLIT_RE = re.compile(
+    r"\s*(?:[?.!;]+|\bplus\b|\band also\b|\balso\b|\balong with\b|\bas well as\b)\s*",
+    re.IGNORECASE,
+)
+LEADING_QUERY_FILLER_PATTERNS = [
+    r"^\s*(?:please\s+)?what can you tell me about\s+",
+    r"^\s*(?:please\s+)?tell me about\s+",
+    r"^\s*(?:please\s+)?what do you know about\s+",
+    r"^\s*(?:please\s+)?give me an overview of\s+",
+    r"^\s*(?:please\s+)?provide an overview of\s+",
+    r"^\s*(?:please\s+)?summari[sz]e\s+",
+    r"^\s*(?:please\s+)?analy[sz]e\s+",
+]
+TRAILING_QUERY_FILLER_PATTERNS = [
+    r"\bwhat are your insights\b",
+    r"\bshare your insights\b",
+    r"\bgive your insights\b",
+    r"\bwhole\b",
+    r"\boverall\b",
+]
+VISUAL_STYLE_TERMS = [
+    "style",
+    "layout",
+    "design",
+    "format",
+    "formatting",
+    "appearance",
+    "look",
+    "visual",
+]
+SEARCHABLE_DOC_READY_STATUSES = {"completed", "done", "ready"}
 
 
 def _contains_any(text: str, phrases: list[str]) -> bool:
@@ -48,6 +80,152 @@ def _build_conversation_context(messages: list[dict], max_messages: int = 6, max
         total_chars += len(line) + 1
 
     return "\n".join(reversed(parts))
+
+
+def _latest_user_message_payload(messages: list[dict]) -> dict | None:
+    for message in reversed(messages):
+        if message.get("role") == "user":
+            return message
+    return None
+
+
+def _latest_user_has_media(messages: list[dict]) -> bool:
+    latest_user = _latest_user_message_payload(messages)
+    return bool(latest_user and latest_user.get("media"))
+
+
+def _normalize_query_text(text: str) -> str:
+    return " ".join((text or "").split())
+
+
+def _strip_query_filler(text: str) -> str:
+    cleaned = _normalize_query_text(text)
+    for pattern in LEADING_QUERY_FILLER_PATTERNS:
+        cleaned = re.sub(pattern, "", cleaned, flags=re.IGNORECASE)
+    for pattern in TRAILING_QUERY_FILLER_PATTERNS:
+        cleaned = re.sub(pattern, " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,.?")
+    return cleaned
+
+
+def _is_visual_attachment_clause(text: str) -> bool:
+    lowered = text.lower()
+    if _contains_any(lowered, ["image", "photo", "picture", "screenshot"]):
+        return True
+    if _contains_any(lowered, ["resume style", "cv style", "resume layout", "cv layout"]):
+        return True
+    return _contains_any(lowered, ["attached", "attachment"]) and _contains_any(
+        lowered,
+        VISUAL_STYLE_TERMS,
+    )
+
+
+def _derive_doc_focused_query(text: str) -> str:
+    normalized = _normalize_query_text(text)
+    if not normalized:
+        return ""
+
+    clauses = [clause.strip(" ,") for clause in QUERY_SPLIT_RE.split(normalized) if clause.strip(" ,")]
+    kept_clauses = [clause for clause in clauses if not _is_visual_attachment_clause(clause)]
+    candidate = " ".join(kept_clauses) if kept_clauses and len(kept_clauses) != len(clauses) else normalized
+
+    candidate = re.sub(
+        r"\b(?:from|in|on)\s+the\s+(?:attached\s+)?(?:image|photo|picture|screenshot)\b",
+        " ",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    candidate = re.sub(
+        r"\b(?:attached\s+)?(?:resume|cv)\s+(?:style|layout|design|format(?:ting)?|look)\b",
+        " ",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    candidate = re.sub(
+        r"\b(?:style|layout|design|format(?:ting)?|look)\s+of\s+(?:the\s+)?(?:attached\s+)?(?:resume|cv|image|photo|picture|screenshot)\b",
+        " ",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    candidate = re.sub(
+        r"\b(?:attached|attachment)\b",
+        " ",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    candidate = re.sub(r"\s+", " ", candidate).strip(" ,.?")
+    return candidate
+
+
+def _build_rag_queries(state: AgentState) -> list[str]:
+    queries: list[str] = []
+
+    def _add_query(candidate: str) -> None:
+        cleaned = _normalize_query_text(candidate).strip(" ,.?")
+        if cleaned and cleaned not in queries:
+            queries.append(cleaned)
+
+    primary_query = state.search_query or state.last_user_message
+    doc_focused_primary = _derive_doc_focused_query(primary_query)
+    doc_focused_user = _derive_doc_focused_query(state.last_user_message)
+    compact_primary = _strip_query_filler(doc_focused_primary or primary_query)
+    compact_user = _strip_query_filler(doc_focused_user or state.last_user_message)
+
+    _add_query(primary_query)
+    _add_query(doc_focused_primary)
+    _add_query(doc_focused_user)
+
+    for compact_candidate in (compact_primary, compact_user):
+        if 2 <= len(compact_candidate.split()) <= 12:
+            _add_query(compact_candidate)
+
+    base_focus_query = compact_primary or compact_user or doc_focused_primary or primary_query
+    lowered_base_focus = base_focus_query.lower()
+    if _contains_any(lowered_base_focus, ["experience", "career", "background", "journey", "profile"]):
+        _add_query(f"{base_focus_query} work experience")
+        _add_query(f"{base_focus_query} career trajectory")
+
+    for focus in state.analysis_focus[:2]:
+        _add_query(f"{base_focus_query} {focus}")
+
+    capped_queries = queries[:5]
+    if capped_queries:
+        logger.info(f"[rag] Query candidates: {capped_queries}")
+    return capped_queries
+
+
+def _collect_rag_context(
+    queries: list[str],
+    modes: list[str],
+    doc_ids: list[str] | None,
+    max_contexts: int,
+) -> list[str]:
+    contexts: list[str] = []
+
+    for query in queries:
+        for mode in modes:
+            ctx = _sync_rag_query(query, mode=mode, doc_ids=doc_ids)
+            if ctx and ctx not in contexts:
+                contexts.append(ctx)
+            if len(contexts) >= max_contexts:
+                return contexts
+
+    return contexts
+
+
+def _load_searchable_doc_ids() -> list[str]:
+    try:
+        from app.database.document_store import list_documents
+
+        return [
+            str(doc.get("id", "")).strip()
+            for doc in list_documents()
+            if str(doc.get("status", "")).strip().lower() in SEARCHABLE_DOC_READY_STATUSES
+            and str(doc.get("id", "")).strip()
+        ]
+    except Exception as exc:
+        logger.warning(f"[prepare] Failed to load searchable document ids: {exc}")
+        return []
 
 
 def _extract_json_object(raw: str) -> dict:
@@ -209,6 +387,8 @@ def _fallback_search_query(state: AgentState) -> str:
                     "role": "user",
                     "content": (
                         f"History:\n{state.conversation_context}\n\n"
+                        f"Latest user message has image attachment: {'yes' if _latest_user_has_media(state.messages) else 'no'}\n"
+                        f"If the question mixes document facts with image/style comments, keep the retrieval query focused on the document facts.\n\n"
                         f"Question: {state.last_user_message}"
                     ),
                 }],
@@ -258,7 +438,19 @@ def node_prepare(state: AgentState) -> AgentState:
     
     from app.services.map_store import doc_map
     state.available_doc_ids = doc_map.get_docs(state.chat_id)
-    state.has_documents = len(state.available_doc_ids) > 0
+    if state.available_doc_ids:
+        state.has_documents = True
+    else:
+        fallback_doc_ids = _load_searchable_doc_ids()
+        if fallback_doc_ids:
+            state.available_doc_ids = fallback_doc_ids
+            state.has_documents = True
+            logger.info(
+                f"[prepare] Chat {state.chat_id} has no explicit doc mapping; "
+                f"falling back to {len(fallback_doc_ids)} completed uploaded docs."
+            )
+        else:
+            state.has_documents = False
     
     if state.has_documents:
         logger.info(f"[prepare] Chat {state.chat_id} has {len(state.available_doc_ids)} docs.")
@@ -278,6 +470,7 @@ def node_router(state: AgentState) -> AgentState:
     try:
         planner_input = (
             f"Has uploaded documents: {'yes' if state.has_documents else 'no'}\n"
+            f"Latest user message has image attachment: {'yes' if _latest_user_has_media(state.messages) else 'no'}\n"
             f"Conversation context:\n{state.conversation_context or '[none]'}\n\n"
             f"Latest user message:\n{state.last_user_message}"
         )
@@ -352,14 +545,13 @@ def node_rag_semantic(state: AgentState) -> AgentState:
     if state.strategy != "A" or not state.search_query:
         return state
 
-    hybrid_ctx = _sync_rag_query(
-        state.search_query, mode="hybrid", doc_ids=state.available_doc_ids
+    queries = _build_rag_queries(state)
+    contexts = _collect_rag_context(
+        queries=queries,
+        modes=["hybrid", "graph"],
+        doc_ids=state.available_doc_ids,
+        max_contexts=2,
     )
-    graph_ctx = _sync_rag_query(
-        state.search_query, mode="graph", doc_ids=state.available_doc_ids
-    )
-
-    contexts = [c for c in [hybrid_ctx, graph_ctx] if c and "[No relevant" not in c]
     state.rag_context = "\n\n".join(contexts) if contexts else ""
     return state
 
@@ -368,20 +560,13 @@ def node_rag_graph(state: AgentState) -> AgentState:
     if state.strategy != "B" or not state.search_query:
         return state
 
-    queries = [state.search_query]
-    
-    if state.analysis_focus and len(state.analysis_focus) > 1:
-        for focus in state.analysis_focus[:3]:
-            focused_q = f"{focus}: {state.last_user_message}"
-            if focused_q not in queries:
-                queries.append(focused_q)
-
-    contexts = []
-    for q in queries:
-        ctx = _sync_rag_query(q, mode="graph", doc_ids=state.available_doc_ids)
-        if ctx and "[No relevant" not in ctx:
-            contexts.append(ctx)
-
+    queries = _build_rag_queries(state)
+    contexts = _collect_rag_context(
+        queries=queries,
+        modes=["graph"],
+        doc_ids=state.available_doc_ids,
+        max_contexts=3,
+    )
     state.rag_context = "\n\n".join(contexts) if contexts else ""
     return state
 
@@ -444,7 +629,8 @@ def node_llm(state: AgentState) -> AgentState:
 
     messages = state.messages
     if state.strategy == "B":
-        messages = [{"role": "user", "content": state.last_user_message}]
+        latest_user_message = _latest_user_message_payload(state.messages)
+        messages = [latest_user_message] if latest_user_message else [{"role": "user", "content": state.last_user_message}]
 
     try:
         reply = chat_completion(

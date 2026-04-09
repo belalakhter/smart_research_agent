@@ -1,5 +1,6 @@
 const API = '/api';
-let state = { chats: {}, currentChatId: null, messages: [], docs: [], isThinking: false };
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+let state = { chats: {}, currentChatId: null, messages: [], docs: [], isThinking: false, pendingImage: null };
 
 /* ── HTTP ── */
 async function apiFetch(method, path, body, isFormData = false) {
@@ -161,7 +162,7 @@ function renderMarkdown(text) {
       continue;
     }
 
-    const headingMatch = line.match(/^(#{1,3})\s+(.*)$/);
+    const headingMatch = line.match(/^(#{1,6})\s+(.*)$/);
     if (headingMatch) {
       const level = headingMatch[1].length;
       blocks.push(`<h${level}>${renderInlineMarkdown(headingMatch[2].trim())}</h${level}>`);
@@ -216,7 +217,7 @@ function renderMarkdown(text) {
 
       if (!currentTrimmed) break;
       if (currentTrimmed.startsWith('```')) break;
-      if (/^(#{1,3})\s+/.test(currentTrimmed)) break;
+      if (/^(#{1,6})\s+/.test(currentTrimmed)) break;
       if (isListItem(current, false) || isListItem(current, true)) break;
       if (
         nextLine &&
@@ -247,6 +248,89 @@ function updateSendButton() {
   s.disabled = !(i.value.trim() && state.currentChatId && !state.isThinking);
 }
 
+function renderUserMessageContent(content, media = null) {
+  const parts = [];
+  if (media?.name) {
+    parts.push(`
+      <div class="user-attachment">
+        <svg width="12" height="12" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+          <path d="M5.5 8.5l4.6-4.6a2.75 2.75 0 113.9 3.9l-6.18 6.18a4 4 0 11-5.66-5.66l5.66-5.66"
+            stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <span class="user-attachment-name">${escHtml(media.name)}</span>
+      </div>
+    `);
+  }
+  if (content) {
+    parts.push(`<div class="user-message-text">${escHtml(content)}</div>`);
+  }
+  return parts.join('');
+}
+
+function renderPendingImage() {
+  const chip = document.getElementById('image-attachment-chip');
+  const preview = chip.querySelector('.attachment-chip-preview');
+  const attachBtn = document.getElementById('attach-image-btn');
+
+  if (!state.pendingImage) {
+    chip.hidden = true;
+    chip.removeAttribute('title');
+    preview.style.backgroundImage = '';
+    attachBtn.hidden = false;
+    attachBtn.classList.remove('has-attachment');
+    return;
+  }
+
+  chip.hidden = false;
+  chip.title = state.pendingImage.name || 'Attached image';
+  preview.style.backgroundImage = `url("${state.pendingImage.data_url}")`;
+  attachBtn.hidden = true;
+  attachBtn.classList.add('has-attachment');
+}
+
+function clearPendingImage() {
+  state.pendingImage = null;
+  document.getElementById('image-input').value = '';
+  renderPendingImage();
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ''));
+    reader.onerror = () => reject(reader.error || new Error('Failed to read image.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function setPendingImage(file) {
+  if (!file) return;
+  if (!file.type.startsWith('image/')) {
+    clearPendingImage();
+    toast('Please choose a valid image file.', 'error');
+    return;
+  }
+  if (file.size > MAX_IMAGE_BYTES) {
+    clearPendingImage();
+    toast('Image is too large. Please keep it under 5 MB.', 'error');
+    return;
+  }
+
+  try {
+    const dataUrl = await readFileAsDataUrl(file);
+    state.pendingImage = {
+      type: 'image',
+      name: file.name,
+      mime_type: file.type || 'image/png',
+      data_url: dataUrl,
+    };
+    renderPendingImage();
+  } catch (e) {
+    clearPendingImage();
+    toast('Image attachment failed: ' + e.message, 'error');
+  }
+}
+
 /* ── Views ── */
 function setView(mode) {
   const empty = document.getElementById('empty-state'), chat = document.getElementById('chat-area');
@@ -262,13 +346,13 @@ function updateTopbar() {
 }
 
 /* ── Messages ── */
-function appendMessage(role, content) {
+function appendMessage(role, content, media = null) {
   const c = document.getElementById('messages'), row = document.createElement('div');
   row.className = `msg-row ${role}`;
   if (role === 'assistant') {
     row.innerHTML = `<img src="/assets/icon.png" class="msg-avatar" alt="S"><div class="msg-content">${renderMarkdown(content)}</div>`;
   } else {
-    row.innerHTML = `<div class="msg-content">${escHtml(content)}</div>`;
+    row.innerHTML = `<div class="msg-content">${renderUserMessageContent(content, media)}</div>`;
   }
   c.appendChild(row); scrollToBottom();
 }
@@ -280,7 +364,7 @@ function showThinking() {
 function hideThinking() { const e = document.getElementById('thinking-indicator'); if (e) e.remove(); }
 function renderMessages() {
   document.getElementById('messages').innerHTML = '';
-  state.messages.forEach(m => appendMessage(m.role, m.content)); scrollToBottom();
+  state.messages.forEach(m => appendMessage(m.role, m.content, m.media)); scrollToBottom();
 }
 
 /* ── Conv list ── */
@@ -353,6 +437,7 @@ async function selectChat(cid) {
   if (cid === state.currentChatId) return;
   try {
     const data = await apiFetch('GET', `/chats/${cid}`);
+    clearPendingImage();
     state.currentChatId = cid; state.messages = data.messages || [];
     renderConvList(); updateTopbar();
     if (state.messages.length === 0) setView('empty');
@@ -364,8 +449,9 @@ async function createChat() {
   try {
     const res = await apiFetch('POST', '/chats', { name: 'New Conversation' });
     if (!res.id) return;
+    clearPendingImage();
     state.chats[res.id] = res; state.currentChatId = res.id; state.messages = [];
-    renderConvList(); updateTopbar(); setView('empty');
+    renderMessages(); renderConvList(); updateTopbar(); setView('empty');
     document.getElementById('msg-input').focus();
   } catch (e) { toast('Failed to create chat: ' + e.message, 'error'); }
 }
@@ -373,20 +459,25 @@ async function deleteChat(cid) {
   try {
     await apiFetch('DELETE', `/chats/${cid}`);
     delete state.chats[cid];
-    if (state.currentChatId === cid) { state.currentChatId = null; state.messages = []; updateTopbar(); setView('empty'); }
+    if (state.currentChatId === cid) { clearPendingImage(); state.currentChatId = null; state.messages = []; renderMessages(); updateTopbar(); setView('empty'); }
     renderConvList(); toast('Conversation deleted');
   } catch (e) { toast('Delete failed: ' + e.message, 'error'); }
 }
 
 /* ── Send message ── */
-async function sendMessage(text) {
+async function sendMessage(text, media = null) {
   if (!text || !state.currentChatId || state.isThinking) return;
   state.isThinking = true; updateSendButton();
   if (state.messages.length === 0) setView('chat');
-  appendMessage('user', text); state.messages.push({ role: 'user', content: text }); showThinking();
+  const optimisticMedia = media ? { name: media.name } : null;
+  appendMessage('user', text, optimisticMedia);
+  state.messages.push({ role: 'user', content: text, ...(optimisticMedia ? { media: optimisticMedia } : {}) });
+  showThinking();
   const input = document.getElementById('msg-input'); input.disabled = true;
   try {
-    const res = await apiFetch('POST', `/chats/${state.currentChatId}/messages`, { message: text });
+    const payload = { message: text };
+    if (media) payload.media = media;
+    const res = await apiFetch('POST', `/chats/${state.currentChatId}/messages`, payload);
     hideThinking();
     const reply = res.reply || 'No response';
     appendMessage('assistant', reply);
@@ -468,12 +559,12 @@ async function uploadDocument(file) {
   }
   const label = document.getElementById('upload-label'), labelText = document.getElementById('upload-label-text');
   label.classList.add('uploading'); labelText.textContent = 'Uploading…';
-  const fd = new FormData(); 
+  const fd = new FormData();
   fd.append('file', file);
   if (state.currentChatId) fd.append('chat_id', state.currentChatId);
   try {
     const res = await apiFetch('POST', '/documents', fd, true);
-    await loadDocs(); 
+    await loadDocs();
     toast(`"${res.filename}" uploaded`, 'success');
   } catch (e) { toast('Upload failed: ' + e.message, 'error'); }
   finally { label.classList.remove('uploading'); labelText.textContent = 'Browse files'; document.getElementById('file-input').value = ''; }
@@ -485,16 +576,35 @@ async function deleteDocument(docId, filename) {
   } catch (e) { toast('Delete failed: ' + e.message, 'error'); }
 }
 
+function submitCurrentMessage() {
+  const text = msgInput.value.trim();
+  if (!text) return;
+  const media = state.pendingImage ? { ...state.pendingImage } : null;
+  msgInput.value = '';
+  autoResize(msgInput);
+  clearPendingImage();
+  sendMessage(text, media);
+}
+
 /* ── Events ── */
 document.getElementById('file-input').addEventListener('change', e => { const f = e.target.files[0]; if (f) uploadDocument(f); });
+document.getElementById('image-input').addEventListener('change', async e => {
+  const file = e.target.files[0];
+  if (file) await setPendingImage(file);
+  e.target.value = '';
+});
+document.getElementById('attach-image-btn').addEventListener('click', () => {
+  if (!state.isThinking) document.getElementById('image-input').click();
+});
+document.getElementById('clear-image-btn').addEventListener('click', clearPendingImage);
 const msgInput = document.getElementById('msg-input');
 msgInput.addEventListener('keydown', e => {
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); const t = msgInput.value.trim(); if (!t) return; msgInput.value = ''; autoResize(msgInput); sendMessage(t); }
+  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitCurrentMessage(); }
 });
 msgInput.addEventListener('input', () => { autoResize(msgInput); updateSendButton(); });
-document.getElementById('send-btn').addEventListener('click', () => { const t = msgInput.value.trim(); if (!t) return; msgInput.value = ''; autoResize(msgInput); sendMessage(t); });
+document.getElementById('send-btn').addEventListener('click', submitCurrentMessage);
 document.getElementById('new-chat-btn').addEventListener('click', createChat);
 
 /* ── Init ── */
-async function init() { await Promise.all([loadChats(), loadDocs()]); setView('empty'); updateSendButton(); }
+async function init() { await Promise.all([loadChats(), loadDocs()]); clearPendingImage(); setView('empty'); updateSendButton(); }
 init();
